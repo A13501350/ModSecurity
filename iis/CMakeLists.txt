@@ -7,10 +7,8 @@ find_package(PCRE2 CONFIG REQUIRED)
 find_package(CURL CONFIG REQUIRED)
 find_package(APR CONFIG REQUIRED)
 
-# iis/CMakeLists.txt
-set(IIS_MODULE_NAME "modsecurityiis")  # Name should match the original output
+set(IIS_MODULE_NAME "modsecurityiis")
 
-# Source files for IIS module (reusing Apache sources)
 set(IIS_APACHE_SOURCES
     ../apache2/mod_security2.c
     ../apache2/apache2_config.c
@@ -218,23 +216,19 @@ endif()
 option(WITH_SSDEEP "Enable SSDEEP support" OFF)
 if(WITH_SSDEEP)
 
-    set(SSDEEP_ROOT "" CACHE PATH "Path to manually built ssdeep")
-    if(NOT SSDEEP_ROOT OR NOT EXISTS "${SSDEEP_ROOT}")
+    if(NOT EXISTS "${SSDEEP_ROOT}")
         message(WARNING "SSDEEP_ROOT is not defined or path does not exist. Current SSDEEP_ROOT: '${SSDEEP_ROOT}'. Please set SSDEEP_ROOT to the ssdeep installation directory. Disabling SSDEEP support.")
         set(WITH_SSDEEP OFF CACHE BOOL "Enable SSDEEP support" FORCE)
     else()
 
         file(TO_CMAKE_PATH "${SSDEEP_ROOT}" SSDEEP_ROOT)
 
-        message(STATUS "SSDEEP_ROOT: ${SSDEEP_ROOT}")
-
         find_path(SSDEEP_INCLUDE_DIR fuzzy.h
-            PATHS "${SSDEEP_ROOT}/include"
+            PATHS "${SSDEEP_ROOT}"
             NO_DEFAULT_PATH
         )
         
         if(SSDEEP_INCLUDE_DIR)
-            message(STATUS "Found manually built ssdeep include: ${SSDEEP_INCLUDE_DIR}")
             target_compile_definitions(${IIS_MODULE_NAME} PRIVATE WITH_SSDEEP)
             target_include_directories(${IIS_MODULE_NAME} PRIVATE ${SSDEEP_INCLUDE_DIR})
 
@@ -244,7 +238,7 @@ if(WITH_SSDEEP)
                 set(WITH_SSDEEP OFF CACHE BOOL "Enable SSDEEP support" FORCE)
             else()
                 set(SSDEEP_GENERATED_LIB "${CMAKE_CURRENT_BINARY_DIR}/fuzzy.lib")
-                set(SSDEEP_GENERATED_dll "${CMAKE_CURRENT_BINARY_DIR}/bin/fuzzy.dll")
+                set(SSDEEP_GENERATED_dll "${CMAKE_CURRENT_BINARY_DIR}/fuzzy.dll")
                 
                 add_custom_command(
                     OUTPUT ${SSDEEP_GENERATED_LIB}
@@ -271,6 +265,9 @@ if(WITH_SSDEEP)
                 )
                  
              endif()
+        else()
+             message(WARNING "fuzzy.h not found at ${SSDEEP_INCLUDE_DIR}. Disabling SSDEEP support.")
+             set(WITH_SSDEEP OFF CACHE BOOL "Enable SSDEEP support" FORCE)
         endif()
     endif()
 endif()
@@ -291,18 +288,6 @@ target_link_libraries(${IIS_MODULE_NAME} PRIVATE
     LibXml2::LibXml2
     PCRE2::8BIT
     CURL::libcurl
-    kernel32
-    user32
-    gdi32
-    winspool
-    comdlg32
-    advapi32
-    shell32
-    ole32
-    oleaut32
-    uuid
-    odbc32
-    odbccp32
     ws2_32
     iphlpapi
 )
@@ -349,10 +334,10 @@ else()
     message(WARNING "APACHE_ROOT is not defined or path does not exist. Current APACHE_ROOT: '${APACHE_ROOT}'. Please set APACHE_ROOT to the Apache installation directory.")
 endif()
 
-if(WITH_SSDEEP AND SSDEEP_ROOT AND EXISTS "${SSDEEP_ROOT}/bin/fuzzy.dll")
+if(WITH_SSDEEP AND SSDEEP_ROOT AND EXISTS "${SSDEEP_ROOT}/fuzzy.dll")
     add_custom_command(TARGET ${IIS_MODULE_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${SSDEEP_ROOT}/bin/fuzzy.dll"
+            "${SSDEEP_ROOT}/fuzzy.dll"
             $<TARGET_FILE_DIR:${IIS_MODULE_NAME}>
         COMMENT "Copying SSDEEP DLL to output directory"
     )
