@@ -44,7 +44,6 @@ set(IIS_APACHE_SOURCES
     ../apache2/libinjection/libinjection_xss.c
 )
 
-# Source files for standalone components (if they exist in the project)
 set(IIS_STANDALONE_SOURCES
     ../standalone/api.c
     ../standalone/buckets.c
@@ -55,16 +54,10 @@ set(IIS_STANDALONE_SOURCES
     ../standalone/server.c
 )
 
-# Determine architecture
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(ARCHITECTURE "x64")
 else()
     set(ARCHITECTURE "x86")
-endif()
-
-# Check if standalone directory exists, if not, exclude those sources
-if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../standalone)
-    set(IIS_STANDALONE_SOURCES "")
 endif()
 
 set(IIS_RESOURCE_MC "${CMAKE_CURRENT_SOURCE_DIR}/ModSecurityIISMessage.mc")
@@ -108,27 +101,19 @@ set_target_properties(${IIS_MODULE_NAME} PROPERTIES
     SUFFIX ".dll"
 )
 
-# Include directories
 target_include_directories(${IIS_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../apache2
     ${CMAKE_CURRENT_SOURCE_DIR}/../apache2/libinjection
     ${LIBXML2_INCLUDE_DIR}/libxml
+    ${CMAKE_CURRENT_SOURCE_DIR}/../standalone
     ${PCRE2_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
     ${APR_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# Include standalone directory if it exists
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../standalone)
-    target_include_directories(${IIS_MODULE_NAME} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../standalone
-    )
-endif()
-
-# Apache-specific includes
 if(APACHE_ROOT)
     if(NOT EXISTS "${APACHE_ROOT}")
         message(FATAL_ERROR "APACHE_ROOT is defined but the directory '${APACHE_ROOT}' does not exist. Please set APACHE_ROOT to a valid Apache installation directory.")
@@ -170,7 +155,6 @@ if(APACHE_ROOT)
     )
 endif()
 
-# Compile definitions to match the original Makefile.win
 set(MODSECURITY_VERSION_FLAG "VERSION_IIS") # Define the version flag string
 target_compile_definitions(${IIS_MODULE_NAME} PRIVATE
     inline=APR_INLINE
@@ -179,11 +163,10 @@ target_compile_definitions(${IIS_MODULE_NAME} PRIVATE
     WITH_REMOTE_RULES
     MSC_LARGE_STREAM_INPUT
     WITH_YAJL
-    ${MODSECURITY_VERSION_FLAG}  # Use the defined version flag
+    ${MODSECURITY_VERSION_FLAG}
 )
 
 option(WITH_LUA "Enable Lua support" OFF)
-# Optional compile definitions
 if(WITH_LUA)
     find_package(Lua CONFIG REQUIRED)
     target_compile_definitions(${IIS_MODULE_NAME} PRIVATE WITH_LUA)
@@ -209,7 +192,7 @@ if(WITH_YAJL)
         target_include_directories(${IIS_MODULE_NAME} PRIVATE ${YAJL_INCLUDE_DIRS})
     else()
         message(WARNING "YAJL not found. YAJL_INCLUDE_DIR: '${YAJL_INCLUDE_DIR}', YAJL_LIBRARY: '${YAJL_LIBRARY}'. Please ensure yajl is installed via vcpkg in the vcpkg_installed directory. Disabling YAJL support.")
-        option(WITH_YAJL "Enable YAJL support" OFF) # Disable if not found
+        option(WITH_YAJL "Enable YAJL support" OFF)
     endif() 
 endif()
 
@@ -272,18 +255,15 @@ if(WITH_SSDEEP)
     endif()
 endif()
 
-# Compiler-specific options for MSVC to match the original Makefile.win
 if(MSVC)
     target_compile_options(${IIS_MODULE_NAME} PRIVATE
         /nologo
         /W3
         /wd4244
         /wd4018
-  
     )
 endif()
 
-# Link libraries to match the original Makefile.win
 target_link_libraries(${IIS_MODULE_NAME} PRIVATE
     LibXml2::LibXml2
     PCRE2::8BIT
@@ -292,7 +272,6 @@ target_link_libraries(${IIS_MODULE_NAME} PRIVATE
     iphlpapi
 )
 
-# Apache-specific libraries
 if(APACHE_ROOT)
     target_link_libraries(${IIS_MODULE_NAME} PRIVATE
         Apache::httpd
@@ -304,7 +283,6 @@ else()
     message(WARNING "APACHE_ROOT is not defined or path does not exist. Current APACHE_ROOT: '${APACHE_ROOT}'. Please set APACHE_ROOT to the Apache installation directory.")
 endif()
 
-# Optional link libraries
 if(WITH_LUA)
     target_link_libraries(${IIS_MODULE_NAME} PRIVATE ${LUA_LIBRARIES})
 endif()
