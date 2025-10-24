@@ -46,6 +46,7 @@ jobs:
         msystem: ${{ matrix.arch == 'x86' && 'MINGW32' || 'UCRT64' }}
         update: true
         install: >
+          git
           make
           autoconf
           automake
