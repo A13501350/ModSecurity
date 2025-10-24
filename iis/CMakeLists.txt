@@ -337,9 +337,9 @@ if(APACHE_ROOT AND EXISTS "${APACHE_ROOT}/bin")
     )
 endif()
 
-if(WITH_SSDEEP AND SSDEEP_ROOT AND EXISTS "${SSDEEP_ROOT}/bin/fuzzy.dll")
+if(WITH_SSDEEP AND SSDEEP_ROOT AND EXISTS "${SSDEEP_ROOT}/fuzzy.dll")
     install(FILES
-        "${SSDEEP_ROOT}/bin/fuzzy.dll"
+        "${SSDEEP_ROOT}/fuzzy.dll"
         DESTINATION .
     )
 endif()

@@ -305,6 +305,9 @@ jobs:
       run: |
         go install github.com/coreruleset/go-ftw@latest
 
+    # Certain rules are disabled due to specific IIS behavior patterns.
+    # Using go-ftw in cloud mode as the IIS connector does not generate logs in file format.
+    # Technically, Event logs can be streamed to files, but this requires implementing rate limits to avoid log overflow.
     - name: Test ModSecurity Rules
       shell: pwsh
       run: |
