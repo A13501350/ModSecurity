@@ -37,7 +37,7 @@ jobs:
         echo "APACHE_ROOT=C:\tools\Apache24" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
     
     - name: Setup MSYS2
-      uses: msys2/setup-msys2@847bbebdb774c27cd90b723718456dd14637b641
+      uses: msys2/setup-msys2@v2
       with:
         msystem: ${{ matrix.arch == 'x86' && 'MINGW32' || 'UCRT64' }}
         update: true
