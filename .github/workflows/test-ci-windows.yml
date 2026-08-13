@@ -344,6 +344,29 @@ jobs:
 
         Get-EventLog -LogName Application -Source ModSecurity | Format-List
 
+    - name: Diagnose audit log
+      shell: pwsh
+      run: |
+        $auditLogPath = "c:\inetpub\logs\modsec_audit.log"
+        Write-Host "Audit log exists: $(Test-Path -LiteralPath $auditLogPath)"
+        if (Test-Path -LiteralPath $auditLogPath) {
+            Write-Host "Audit log size before: $((Get-Item -LiteralPath $auditLogPath).Length) bytes"
+        }
+        $marker = "hello-marker-$(Get-Random)"
+        try {
+            $resp = Invoke-WebRequest "http://localhost/?probe=1" -Headers @{ "X-CRS-Test" = $marker } -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
+            Write-Host "Probe request status: $($resp.StatusCode)"
+        } catch {
+            Write-Host "Probe request error: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds 2
+        if (Test-Path -LiteralPath $auditLogPath) {
+            Write-Host "Audit log size after: $((Get-Item -LiteralPath $auditLogPath).Length) bytes"
+            Write-Host "--- TAIL OF AUDIT LOG ---"
+            Get-Content -LiteralPath $auditLogPath -Tail 60
+            Write-Host "--- marker found in log: $((Select-String -Path $auditLogPath -Pattern $marker -Quiet)) ---"
+        }
+
     - name: Install go-ftw
       shell: pwsh
       run: |
@@ -367,4 +390,13 @@ jobs:
         }
 
         & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\.ftw.yaml" -e "920100-2$|920100-4$|920100-8$|920100-12$|920272-5$|920290-1$|920620-1$|920380-1$" --show-failures-only
+        $exitCode = $LASTEXITCODE
+        Write-Host "go-ftw exit code: $exitCode"
+        $auditLogPath = "c:\inetpub\logs\modsec_audit.log"
+        if (Test-Path -LiteralPath $auditLogPath) {
+            Write-Host "Audit log size after run: $((Get-Item -LiteralPath $auditLogPath).Length) bytes"
+            Write-Host "--- TAIL OF AUDIT LOG AFTER go-ftw ---"
+            Get-Content -LiteralPath $auditLogPath -Tail 40
+        }
+        exit $exitCode
 
