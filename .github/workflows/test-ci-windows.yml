@@ -389,17 +389,9 @@ jobs:
             $goBinPath = Join-Path $env:USERPROFILE "go\bin"
         }
 
-        Write-Host "======== DIAGNOSTIC: single rule 920100-10 with failure log capture ========"
-        $failLog = "c:\inetpub\logs\go-ftw-failure-waf-logs.log"
-        Remove-Item -LiteralPath $failLog -ErrorAction SilentlyContinue
-        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir\920100" --config "${{ github.workspace }}\.ftw.yaml" -i "920100-10" --store-failure-waf-logs
+        Write-Host "======== DIAGNOSTIC: single rule 920100-10 debug ========"
+        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir\920100" --config "${{ github.workspace }}\.ftw.yaml" -i "920100-10" --debug
         Write-Host "DIAGNOSTIC single-rule exit code: $LASTEXITCODE"
-        if (Test-Path -LiteralPath $failLog) {
-            Write-Host "--- FAILURE WAF LOG ---"
-            Get-Content -LiteralPath $failLog
-        } else {
-            Write-Host "No failure waf log produced (test may have passed)."
-        }
         Write-Host "======== END DIAGNOSTIC single rule ========"
 
         & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\.ftw.yaml" -e "920100-2$|920100-4$|920100-8$|920100-12$|920272-5$|920290-1$|920620-1$|920380-1$" --show-failures-only
