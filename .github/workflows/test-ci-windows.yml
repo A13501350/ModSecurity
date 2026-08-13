@@ -389,10 +389,10 @@ jobs:
             $goBinPath = Join-Path $env:USERPROFILE "go\bin"
         }
 
-        Write-Host "======== DIAGNOSTIC: single rule 920100-10 debug ========"
-        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir\920100" --config "${{ github.workspace }}\.ftw.yaml" -i "920100-10" --debug
-        Write-Host "DIAGNOSTIC single-rule exit code: $LASTEXITCODE"
-        Write-Host "======== END DIAGNOSTIC single rule ========"
+        Write-Host "======== DIAGNOSTIC: rule 920100 trace ========"
+        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir\920100" --config "${{ github.workspace }}\.ftw.yaml" --trace 2>&1 | Select-String -Pattern 'Looking for any rule|Found|start marker|end marker|marker|failed|expected|got|💥|\+\+'
+        Write-Host "DIAGNOSTIC exit code: $LASTEXITCODE"
+        Write-Host "======== END DIAGNOSTIC 920100 ========"
 
         & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\.ftw.yaml" -e "920100-2$|920100-4$|920100-8$|920100-12$|920272-5$|920290-1$|920620-1$|920380-1$" --show-failures-only
         $exitCode = $LASTEXITCODE
