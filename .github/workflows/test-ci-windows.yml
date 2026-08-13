@@ -265,6 +265,30 @@ jobs:
 
         Write-Host "Appended audit log configuration to $modSecurityConfigFile"
 
+        # The audit log file is opened at config-parse time by the worker
+        # process (w3wp, running as NETWORK SERVICE). Ensure the directory
+        # exists and is writable by NETWORK SERVICE and IIS_IUSRS, otherwise
+        # cmd_audit_log fails with "Command failed to execute".
+        $auditLogDir = "C:\inetpub\logs"
+        if (-not (Test-Path $auditLogDir)) {
+          New-Item -ItemType Directory -Path $auditLogDir -Force | Out-Null
+        }
+
+        $acl = Get-Acl $auditLogDir
+        foreach ($identity in @("NETWORK SERVICE", "IIS_IUSRS")) {
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $identity,
+            "Modify",
+            "ContainerInherit,ObjectInherit",
+            "None",
+            "Allow"
+          )
+          $acl.SetAccessRule($rule)
+        }
+        Set-Acl -Path $auditLogDir -AclObject $acl
+
+        Write-Host "Audit log directory $auditLogDir prepared with write access for NETWORK SERVICE and IIS_IUSRS"
+
     - name: Test IIS Module
       shell: pwsh
       run: |
