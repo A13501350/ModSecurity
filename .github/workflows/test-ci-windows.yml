@@ -250,6 +250,21 @@ jobs:
             exit 1
         }
 
+    - name: Enable audit log
+      shell: pwsh
+      run: |
+        $modSecurityConfigFile = "C:\Program Files\ModSecurity IIS\modsecurity.conf"
+
+        $auditConfig = @(
+          "# Audit log enabled for CI verification",
+          "SecAuditEngine On",
+          "SecAuditLog C:\inetpub\logs\modsec_audit.log"
+        )
+
+        Add-Content -Path $modSecurityConfigFile -Value $auditConfig
+
+        Write-Host "Appended audit log configuration to $modSecurityConfigFile"
+
     - name: Test IIS Module
       shell: pwsh
       run: |
@@ -307,6 +322,43 @@ jobs:
         }
 
         Get-EventLog -LogName Application -Source ModSecurity | Format-List
+
+    - name: Print and check audit log
+      shell: pwsh
+      run: |
+        $auditLog = "C:\inetpub\logs\modsec_audit.log"
+
+        # Give IIS time to flush audit records
+        Start-Sleep -Seconds 2
+
+        if (-not (Test-Path $auditLog)) {
+          Write-Host "::error:: Audit log not found at $auditLog"
+          exit 1
+        }
+
+        Write-Host "===== Audit log ====="
+        Get-Content $auditLog
+
+        $fStatusLines = Select-String -Path $auditLog -Pattern '^HTTP/1\.[01] \d{3} ' | ForEach-Object { $_.Line }
+        Write-Host "===== F-part status lines ====="
+        $fStatusLines
+
+        if (-not $fStatusLines) {
+          Write-Host "::error:: No F-part status lines found in audit log"
+          exit 1
+        }
+
+        if ($fStatusLines -match 'HTTP/1\.[01] 500 ') {
+          Write-Host "::error:: Found bogus 'HTTP/1.1 500' status in audit log F part"
+          exit 1
+        }
+
+        if (-not ($fStatusLines -match 'HTTP/1\.[01] 200 ')) {
+          Write-Host "::error:: Expected a 200 status for the normal request in audit log F part"
+          exit 1
+        }
+
+        Write-Host "Audit log F-part status check PASSED"
 
     - name: Install go-ftw
       shell: pwsh
