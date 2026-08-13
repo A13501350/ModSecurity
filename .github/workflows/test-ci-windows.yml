@@ -264,7 +264,7 @@ jobs:
             "",
             "# -- Audit log to file (enabled for go-ftw standard mode) -------------",
             "SecAuditEngine RelevantOnly",
-            "SecAuditLogRelevantStatus \"^(?:5|4(?!04))\"",
+            'SecAuditLogRelevantStatus "^(?:5|4(?!04))"',
             "SecAuditLogParts ABIJDEFHZ",
             "SecAuditLogType Serial",
             "SecAuditLog $auditLogPath"
@@ -276,7 +276,7 @@ jobs:
           $markerRule = @(
             "",
             "# go-ftw log marker",
-            "SecRule REQUEST_HEADERS:X-CRS-Test \"@rx ^.*$\" \"id:999999,pass,phase:1,log,msg:'X-CRS-Test %{MATCHED_VAR}',ctl:ruleRemoveById=1-999999\""
+            'SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" "id:999999,pass,phase:1,log,msg:''X-CRS-Test %{MATCHED_VAR}'',ctl:ruleRemoveById=1-999999"'
           )
           Add-Content -Path $modSecurityConfigFile -Value $markerRule
 
