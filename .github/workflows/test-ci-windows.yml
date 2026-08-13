@@ -244,6 +244,42 @@ jobs:
 
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
+          # Enable file-based audit logging so go-ftw can run in standard (default) mode.
+          # The IIS connector writes the audit log via the core engine using APR file I/O
+          # (see apache2_config.c cmd_audit_log / msc_logging.c sec_audit_logger).
+          # An absolute Windows path avoids Apache server_root-relative resolution.
+          $auditLogDir = "c:\inetpub\logs"
+          New-Item -ItemType Directory -Path $auditLogDir -Force | Out-Null
+          # Grant write access so the IIS worker process (Network Service / IIS_IUSRS)
+          # can create and append to the audit log file.
+          $acl = Get-Acl -LiteralPath $auditLogDir
+          foreach ($identity in @("NETWORK SERVICE", "IIS_IUSRS")) {
+              $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
+              $acl.AddAccessRule($rule)
+          }
+          Set-Acl -LiteralPath $auditLogDir -AclObject $acl
+          $auditLogPath = "c:\inetpub\logs\modsec_audit.log"
+
+          $auditConfig = @(
+            "",
+            "# -- Audit log to file (enabled for go-ftw standard mode) -------------",
+            "SecAuditEngine RelevantOnly",
+            "SecAuditLogRelevantStatus \"^(?:5|4(?!04))\"",
+            "SecAuditLogParts ABIJDEFHZ",
+            "SecAuditLogType Serial",
+            "SecAuditLog $auditLogPath"
+          )
+          Add-Content -Path $modSecurityConfigFile -Value $auditConfig
+
+          # go-ftw standard mode marker rule: write the X-CRS-Test header value to the
+          # audit log so go-ftw can delimit individual test transactions.
+          $markerRule = @(
+            "",
+            "# go-ftw log marker",
+            "SecRule REQUEST_HEADERS:X-CRS-Test \"@rx ^.*$\" \"id:999999,pass,phase:1,log,msg:'X-CRS-Test %{MATCHED_VAR}',ctl:ruleRemoveById=1-999999\""
+          )
+          Add-Content -Path $modSecurityConfigFile -Value $markerRule
+
         }
         catch {
             Write-Error "Failed to install OWASP Core Rules: $($_.Exception.Message)"
@@ -314,8 +350,9 @@ jobs:
         go install github.com/coreruleset/go-ftw@latest
 
     # Certain rules are disabled due to specific IIS behavior patterns.
-    # Using go-ftw in cloud mode as the IIS connector does not generate logs in file format.
-    # Technically, Event logs can be streamed to files, but this requires implementing rate limits to avoid log overflow.
+    # Audit logging is now written to a file (c:\inetpub\logs\modsec_audit.log)
+    # so go-ftw runs in standard (default) mode using log-based verification
+    # instead of relying solely on HTTP status codes.
     - name: Test ModSecurity Rules
       shell: pwsh
       run: |
@@ -329,5 +366,5 @@ jobs:
             $goBinPath = Join-Path $env:USERPROFILE "go\bin"
         }
 
-        & "$goBinPath\go-ftw.exe" run -d $testRuleDir --cloud -e "920100-2$|920100-4$|920100-8$|920100-12$|920272-5$|920290-1$|920620-1$|920380-1$" --show-failures-only
+        & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\.ftw.yaml" -e "920100-2$|920100-4$|920100-8$|920100-12$|920272-5$|920290-1$|920620-1$|920380-1$" --show-failures-only
 
