@@ -390,7 +390,7 @@ jobs:
         }
 
         Write-Host "======== DIAGNOSTIC: rule 920100 trace ========"
-        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir\920100" --config "${{ github.workspace }}\.ftw.yaml" --trace 2>&1 | Select-String -Pattern 'Looking for any rule|Found|start marker|end marker|marker|failed|expected|got|💥|\+\+'
+        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir" --config "${{ github.workspace }}\.ftw.yaml" -i "^920100" --trace 2>&1 | Select-String -Pattern 'Looking for any rule|Found|start marker|end marker|marker|failed|expected|got|💥|\+\+'
         Write-Host "DIAGNOSTIC exit code: $LASTEXITCODE"
         Write-Host "======== END DIAGNOSTIC 920100 ========"
 
