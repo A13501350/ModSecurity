@@ -397,21 +397,22 @@ jobs:
         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to enable ARR proxy"; exit 1 }
 
         # Reverse proxy rule: forward every request to albedo on port 8080
-        $webConfig = @'
-<?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <system.webServer>
-    <rewrite>
-      <rules>
-        <rule name="ReverseProxyToAlbedo" stopProcessing="true">
-          <match url="(.*)" />
-          <action type="Rewrite" url="http://localhost:8080/{R:1}" />
-        </rule>
-      </rules>
-    </rewrite>
-  </system.webServer>
-</configuration>
-'@
+        $webConfigLines = @(
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<configuration>',
+            '  <system.webServer>',
+            '    <rewrite>',
+            '      <rules>',
+            '        <rule name="ReverseProxyToAlbedo" stopProcessing="true">',
+            '          <match url="(.*)" />',
+            '          <action type="Rewrite" url="http://localhost:8080/{R:1}" />',
+            '        </rule>',
+            '      </rules>',
+            '    </rewrite>',
+            '  </system.webServer>',
+            '</configuration>'
+        )
+        $webConfig = $webConfigLines -join "`n"
         Set-Content -Path "C:\inetpub\wwwroot\web.config" -Value $webConfig -Encoding UTF8
 
         # Start albedo backend on port 8080 (background process)
