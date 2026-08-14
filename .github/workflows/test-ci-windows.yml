@@ -273,10 +273,13 @@ jobs:
 
           # go-ftw standard mode marker rule: write the X-CRS-Test header value to the
           # audit log so go-ftw can delimit individual test transactions.
+          # 'auditlog' is required because with SecAuditEngine RelevantOnly a plain
+          # 'log' action is not enough to force the (200 status) marker transaction
+          # into the audit log when albedo serves as the backend.
           $markerRule = @(
             "",
             "# go-ftw log marker",
-            'SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" "id:999999,pass,phase:1,log,msg:''X-CRS-Test %{MATCHED_VAR}'',ctl:ruleRemoveById=1-999999"'
+            'SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" "id:999999,pass,phase:1,auditlog,msg:''X-CRS-Test %{MATCHED_VAR}'',ctl:ruleRemoveById=1-999999"'
           )
           Add-Content -Path $modSecurityConfigFile -Value $markerRule
 
@@ -367,10 +370,81 @@ jobs:
             Write-Host "--- marker found in log: $((Select-String -Path $auditLogPath -Pattern $marker -Quiet)) ---"
         }
 
-    - name: Install go-ftw
+    - name: Install go-ftw and albedo
       shell: pwsh
       run: |
         go install github.com/coreruleset/go-ftw@latest
+        go install github.com/coreruleset/albedo@latest
+
+    - name: Configure IIS reverse proxy to albedo backend
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $goBinPath = ""
+        if ($env:GOBIN) {
+            $goBinPath = $env:GOBIN
+        } elseif ($env:GOPATH) {
+            $goBinPath = Join-Path $env:GOPATH "bin"
+        } else {
+            $goBinPath = Join-Path $env:USERPROFILE "go\bin"
+        }
+
+        # Install URL Rewrite 2.0 and Application Request Routing (ARR)
+        choco install urlrewrite iis-arr -y --no-progress
+
+        # Enable ARR reverse proxy
+        & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set config /section:system.webServer/proxy /enabled:true
+        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to enable ARR proxy"; exit 1 }
+
+        # Reverse proxy rule: forward every request to albedo on port 8080
+        $webConfig = @'
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <rewrite>
+      <rules>
+        <rule name="ReverseProxyToAlbedo" stopProcessing="true">
+          <match url="(.*)" />
+          <action type="Rewrite" url="http://localhost:8080/{R:1}" />
+        </rule>
+      </rules>
+    </rewrite>
+  </system.webServer>
+</configuration>
+'@
+        Set-Content -Path "C:\inetpub\wwwroot\web.config" -Value $webConfig -Encoding UTF8
+
+        # Start albedo backend on port 8080 (background process)
+        $albedoExe = Join-Path $goBinPath "albedo.exe"
+        if (-not (Test-Path -LiteralPath $albedoExe)) {
+            Write-Error "albedo.exe not found at $albedoExe"
+            exit 1
+        }
+        Start-Process -FilePath $albedoExe -ArgumentList "-p", "8080" -WindowStyle Hidden
+
+        # Wait for albedo to accept connections
+        $ready = $false
+        for ($i = 0; $i -lt 30; $i++) {
+            try {
+                $resp = Invoke-WebRequest "http://localhost:8080/capabilities?quiet=true" -UseBasicParsing -TimeoutSec 3
+                if ($resp.StatusCode -eq 200) { $ready = $true; break }
+            } catch {
+                Start-Sleep -Seconds 1
+            }
+        }
+        if (-not $ready) { Write-Error "albedo did not become ready on port 8080"; exit 1 }
+        Write-Host "albedo backend is ready on http://localhost:8080"
+
+        # Restart IIS so the new modules and web.config take effect
+        Restart-Service W3SVC -Force
+
+        # Verify the reverse proxy path works (request served by albedo through IIS)
+        try {
+            $probe = Invoke-WebRequest "http://localhost/status/200" -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 15
+            Write-Host "Reverse proxy probe /status/200 -> $($probe.StatusCode)"
+        } catch {
+            Write-Host "Reverse proxy probe error: $($_.Exception.Message)"
+        }
 
     # Certain rules are disabled due to specific IIS behavior patterns.
     # Audit logging is now written to a file (c:\inetpub\logs\modsec_audit.log)
