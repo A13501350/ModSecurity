@@ -29,7 +29,20 @@ jobs:
       run: |
         $apachePath = "${{ github.workspace }}\apache-x86"
         New-Item -ItemType Directory -Path $apachePath -Force
-        choco install apache-httpd -y --force --forcex86 --no-progress -r --params="'/installLocation:$apachePath /noService'"
+        $installParams = "'/installLocation:$apachePath /noService'"
+        $attempt = 0
+        do {
+          $attempt++
+          Write-Host "choco install apache-httpd attempt $attempt/3"
+          & choco install apache-httpd -y --force --forcex86 --no-progress -r --params="$installParams"
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -eq 0) { break }
+          if ($attempt -lt 3) { Start-Sleep -Seconds 20 }
+        } while ($attempt -lt 3)
+        if ($exitCode -ne 0) {
+          Write-Error "choco install apache-httpd failed with exit code $exitCode after 3 attempts"
+          exit $exitCode
+        }
         echo "APACHE_ROOT=$apachePath\Apache24" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
     - name: Set Apache path for x64
