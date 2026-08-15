@@ -1,0 +1,125 @@
+---
+version: "v0.0.0"
+meta:
+  engine: "libmodsecurity2"
+  platform: "iis"
+  annotations:
+    - os: "Windows Server"
+    - purpose: "CRS test suite"
+test_overrides:
+  - rule_id: 920100
+    test_ids: [2]
+    reason: |
+      HTTP.SYS accepts the request line with leading whitespace before the method and
+      returns 200. IIS/HTTP.SYS does not enforce Apache's strict request-line parsing,
+      so the expected 400 is never produced.
+    output:
+      status: 200
+  - rule_id: 920100
+    test_ids: [4]
+    reason: |
+      HTTP.SYS rejects the CONNECT method (CONNECT 1.2.3.4:80) with a 400 before the
+      module runs, so 920100 never matches.
+    output:
+      status: 400
+      log:
+        no_expect_ids: [920100]
+  - rule_id: 920100
+    test_ids: [8]
+    reason: |
+      HTTP.SYS allows a colon in the path (a legal character in a regular path segment
+      per RFC) and returns 200, unlike Apache which rejects the request with 400.
+    output:
+      status: 200
+  - rule_id: 920100
+    test_ids: [10]
+    reason: |
+      HTTP.SYS accepts the unknown long method and returns 200. The module maps the
+      unknown verb to method "INVALID" and rebuilds the request line as
+      "INVALID / HTTP/1.1", which happens to match the 920100 whitelist regex, so the
+      rule does not fire.
+    output:
+      log:
+        no_expect_ids: [920100]
+  - rule_id: 920100
+    test_ids: [12]
+    reason: |
+      HTTP.SYS accepts the request line with a leading tab before the method and returns
+      200; only Apache rejects it with 400.
+    output:
+      status: 200
+  - rule_id: 920100
+    test_ids: [14]
+    reason: |
+      HTTP.SYS accepts the "|GET" method and returns 200. The module maps the unknown
+      verb to method "INVALID" and rebuilds the request line as "INVALID /get HTTP/1.1",
+      which matches the 920100 whitelist regex, so the rule does not fire.
+    output:
+      log:
+        no_expect_ids: [920100]
+  - rule_id: 920180
+    test_ids: [1, 3]
+    reason: |
+      A POST without a Content-Length header is rejected by HTTP.SYS with 411 Length
+      Required before the module runs, so 920180 never matches.
+    output:
+      log:
+        no_expect_ids: [920180]
+  - rule_id: 920181
+    test_ids: [1]
+    reason: |
+      When both Content-Length and Transfer-Encoding are present, ARR returns 502 Bad
+      Gateway. The module does run and 920181 does fire (unlike Apache which strips the
+      Content-Length header), so the expected 200 / no-rule-match does not hold.
+    output:
+      status: 502
+      log:
+        expect_ids: [920181]
+  - rule_id: 920200
+    test_ids: [4]
+    reason: |
+      HTTP.SYS rejects the malformed Range header ("bytes=-10,-, 21-30,...") with 400
+      before the module runs, so 920200 never matches.
+    output:
+      log:
+        no_expect_ids: [920200]
+  - rule_id: 920290
+    test_ids: [1]
+    reason: |
+      HTTP.SYS accepts a request with an empty Host header and returns 200; only Apache
+      blocks it with 400.
+    output:
+      status: 200
+  - rule_id: 920350
+    test_ids: [1, 3]
+    reason: |
+      HTTP.SYS rejects IP-address Host headers with 400 (Bad Request - Invalid
+      Hostname) before the module runs, so 920350 never matches.
+    output:
+      log:
+        no_expect_ids: [920350]
+  - rule_id: 920430
+    test_ids: [8]
+    reason: |
+      HTTP.SYS returns 505 for an unsupported HTTP protocol version (HTTP/4.0) before
+      the module runs, so 920430 never matches.
+    output:
+      log:
+        no_expect_ids: [920430]
+  - rule_id: 920520
+    test_ids: [7]
+    reason: |
+      HTTP.SYS rejects the malformed Accept-Encoding header (CVE-2022-21907 pattern)
+      with 400 before the module runs, so 920520 never matches.
+    output:
+      log:
+        no_expect_ids: [920520]
+  - rule_id: 920620
+    test_ids: [1]
+    reason: |
+      HTTP.SYS rejects a request carrying duplicate Content-Type headers with 400 before
+      the module runs, so 920620 never matches.
+    output:
+      status: 400
+      log:
+        no_expect_ids: [920620]
