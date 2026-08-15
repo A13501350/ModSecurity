@@ -289,6 +289,10 @@ jobs:
 
         Write-Host "Audit log directory $auditLogDir prepared with write access for NETWORK SERVICE and IIS_IUSRS"
 
+        # Remove any stale audit log from a previous run so the F-part
+        # check below only sees records produced by this run.
+        Remove-Item -Path "C:\inetpub\logs\modsec_audit.log" -Force -ErrorAction SilentlyContinue
+
     - name: Test IIS Module
       shell: pwsh
       run: |
