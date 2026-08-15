@@ -6,10 +6,8 @@ testoverride:
     dest_addr: "localhost"
     port: 80
     protocol: "http"
-  # Tests skipped because IIS/HTTP.SYS behavior differs from the Apache CRS
-  # baseline (module under test is not at fault). Key: test IdString() regex;
-  # value: reason. See runner/run.go needToSkipTest (include wins over exclude,
-  # hence ignore is used instead of an `exclude` key).
+  # IIS/HTTP.SYS behavior differs from the Apache CRS baseline.
+  # go-ftw's include wins over exclude, so these use the ignore map.
   ignore:
     "^920100-(2|8|12)$": "HTTP.SYS accepts request lines Apache rejects with 400"
     "^920100-(10|14)$": "unknown verb becomes method INVALID; rebuilt request line matches 920100 whitelist regex"
@@ -24,5 +22,4 @@ testoverride:
     "^920620-1$": "HTTP.SYS rejects duplicate Content-Type with 400"
     "^941101-2$": "URI contains double quotes; HTTP.SYS rejects it before the module runs"
 
-# Build smoke scope: run a representative subset of rule families, not the full CRS suite.
 include: "^(913|920|930|941)"

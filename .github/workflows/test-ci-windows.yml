@@ -230,12 +230,6 @@ jobs:
               Rename-Item -Path $_.FullName -NewName $newName
           }
 
-          # Test configuration lives in iis/tests/:
-          #   crs-900005.conf        -> appended to crs-setup.conf (must be loaded
-          #                            before the rule files: it is a phase-1
-          #                            SecAction whose tx vars the rules read)
-          #   audit-logging.conf     -> appended to modsecurity_iis.conf (file-based
-          #                            audit log + go-ftw log-marker rule)
           $testConfigDir = "${{ github.workspace }}\iis\tests"
 
           $modSecurityConfigFile = "$modSecurityConfigDir\modsecurity_iis.conf"
@@ -254,16 +248,8 @@ jobs:
 
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
-          # The audit-logging.conf also enables file-based audit logging, so go-ftw
-          # can run in standard (default) mode. The IIS connector writes the audit
-          # log via the core engine using APR file I/O (see apache2_config.c
-          # cmd_audit_log / msc_logging.c sec_audit_logger). The absolute Windows
-          # path in that file avoids Apache server_root-relative resolution.
-          # c:\inetpub\logs must be writable by the IIS worker process.
           $auditLogDir = "c:\inetpub\logs"
           New-Item -ItemType Directory -Path $auditLogDir -Force | Out-Null
-          # Grant write access so the IIS worker process (Network Service / IIS_IUSRS)
-          # can create and append to the audit log file.
           $acl = Get-Acl -LiteralPath $auditLogDir
           foreach ($identity in @("NETWORK SERVICE", "IIS_IUSRS")) {
               $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
@@ -322,7 +308,6 @@ jobs:
         }
         
 
-        # Check event log
         $badMessagePattern = 'Failed to find the RegisterModule entrypoint|The description for Event ID|The data is the error|dll failed to load'
 
         $events = Get-EventLog -LogName Application -Newest 100 |
@@ -382,30 +367,11 @@ jobs:
         # Install URL Rewrite 2.0 and Application Request Routing (ARR)
         choco install urlrewrite iis-arr -y --no-progress
 
-        # Enable ARR reverse proxy
         & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set config /section:system.webServer/proxy /enabled:true
         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to enable ARR proxy"; exit 1 }
 
-        # Reverse proxy rule: forward every request to albedo on port 8080
-        $webConfigLines = @(
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            '<configuration>',
-            '  <system.webServer>',
-            '    <rewrite>',
-            '      <rules>',
-            '        <rule name="ReverseProxyToAlbedo" stopProcessing="true">',
-            '          <match url="(.*)" />',
-            '          <action type="Rewrite" url="http://localhost:8080/{R:1}" />',
-            '        </rule>',
-            '      </rules>',
-            '    </rewrite>',
-            '  </system.webServer>',
-            '</configuration>'
-        )
-        $webConfig = $webConfigLines -join "`n"
-        Set-Content -Path "C:\inetpub\wwwroot\web.config" -Value $webConfig -Encoding UTF8
+        Copy-Item -LiteralPath "${{ github.workspace }}\iis\tests\web.config" -Destination "C:\inetpub\wwwroot\web.config" -Force
 
-        # Start albedo backend on port 8080 (background process)
         $albedoExe = Join-Path $goBinPath "albedo.exe"
         if (-not (Test-Path -LiteralPath $albedoExe)) {
             Write-Error "albedo.exe not found at $albedoExe"
@@ -413,7 +379,6 @@ jobs:
         }
         Start-Process -FilePath $albedoExe -ArgumentList "-p", "8080" -WindowStyle Hidden
 
-        # Wait for albedo to accept connections
         $ready = $false
         for ($i = 0; $i -lt 30; $i++) {
             try {
@@ -426,10 +391,8 @@ jobs:
         if (-not $ready) { Write-Error "albedo did not become ready on port 8080"; exit 1 }
         Write-Host "albedo backend is ready on http://localhost:8080"
 
-        # Restart IIS so the new modules and web.config take effect
         Restart-Service W3SVC -Force
 
-        # Verify the reverse proxy path works (request served by albedo through IIS)
         try {
             $probe = Invoke-WebRequest "http://localhost/status/200" -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 15
             Write-Host "Reverse proxy probe /status/200 -> $($probe.StatusCode)"
@@ -437,10 +400,6 @@ jobs:
             Write-Host "Reverse proxy probe error: $($_.Exception.Message)"
         }
 
-    # Certain rules are disabled due to specific IIS behavior patterns.
-    # Audit logging is now written to a file (c:\inetpub\logs\modsec_audit.log)
-    # so go-ftw runs in standard (default) mode using log-based verification
-    # instead of relying solely on HTTP status codes.
     - name: Test ModSecurity Rules
       shell: pwsh
       run: |
@@ -454,10 +413,6 @@ jobs:
             $goBinPath = Join-Path $env:USERPROFILE "go\bin"
         }
 
-        # Test selection and IIS-specific skips live in iis/tests/ftw.yaml:
-        #   include  -> which rule families run (build smoke scope)
-        #   testoverride.ignore -> tests that cannot hold on IIS/HTTP.SYS
-        # go-ftw's include wins over its exclude, so the ignore map is used.
         & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\iis\tests\ftw.yaml" --show-failures-only
         $exitCode = $LASTEXITCODE
         Write-Host "go-ftw exit code: $exitCode"
