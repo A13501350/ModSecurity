@@ -230,21 +230,17 @@ jobs:
               Rename-Item -Path $_.FullName -NewName $newName
           }
 
-          # Load the CRS regression-suite configuration (rule 900005) so that the
-          # go-ftw test files behave as designed by the CRS project (see
-          # tests/regression/README.md in the coreruleset repo):
-          #   - detection/blocking paranoia level 4 (all PL rules execute)
-          #   - utf-8 validation and argument/file limits enabled
-          #   - DetectionOnly engine (rules fire + log, never block), which is how
-          #     the CRS regression suite is meant to run.
-          $crsTestConfig = @(
-            "",
-            "# -- CRS regression-suite test configuration (see tests/regression/README.md) --",
-            'SecAction "id:900005,phase:1,nolog,pass,ctl:ruleEngine=DetectionOnly,ctl:ruleRemoveById=910000,setvar:tx.blocking_paranoia_level=4,setvar:tx.crs_validate_utf8_encoding=1,setvar:tx.arg_name_length=100,setvar:tx.arg_length=400,setvar:tx.total_arg_length=64000,setvar:tx.max_num_args=255,setvar:tx.max_file_size=64100,setvar:tx.combined_file_sizes=65535"'
-          )
-          Add-Content -Path "$crsDir\crs-setup.conf" -Value $crsTestConfig
+          # Test configuration lives in iis/tests/:
+          #   crs-900005.conf        -> appended to crs-setup.conf (must be loaded
+          #                            before the rule files: it is a phase-1
+          #                            SecAction whose tx vars the rules read)
+          #   audit-logging.conf     -> appended to modsecurity_iis.conf (file-based
+          #                            audit log + go-ftw log-marker rule)
+          $testConfigDir = "${{ github.workspace }}\iis\tests"
 
           $modSecurityConfigFile = "$modSecurityConfigDir\modsecurity_iis.conf"
+
+          Add-Content -Path "$crsDir\crs-setup.conf" -Value (Get-Content -Path "$testConfigDir\crs-900005.conf")
 
           $crsRules = @(
             "Include coreruleset/crs-setup.conf",
@@ -258,10 +254,12 @@ jobs:
 
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
-          # Enable file-based audit logging so go-ftw can run in standard (default) mode.
-          # The IIS connector writes the audit log via the core engine using APR file I/O
-          # (see apache2_config.c cmd_audit_log / msc_logging.c sec_audit_logger).
-          # An absolute Windows path avoids Apache server_root-relative resolution.
+          # The audit-logging.conf also enables file-based audit logging, so go-ftw
+          # can run in standard (default) mode. The IIS connector writes the audit
+          # log via the core engine using APR file I/O (see apache2_config.c
+          # cmd_audit_log / msc_logging.c sec_audit_logger). The absolute Windows
+          # path in that file avoids Apache server_root-relative resolution.
+          # c:\inetpub\logs must be writable by the IIS worker process.
           $auditLogDir = "c:\inetpub\logs"
           New-Item -ItemType Directory -Path $auditLogDir -Force | Out-Null
           # Grant write access so the IIS worker process (Network Service / IIS_IUSRS)
@@ -272,30 +270,8 @@ jobs:
               $acl.AddAccessRule($rule)
           }
           Set-Acl -LiteralPath $auditLogDir -AclObject $acl
-          $auditLogPath = "c:\inetpub\logs\modsec_audit.log"
 
-          $auditConfig = @(
-            "",
-            "# -- Audit log to file (enabled for go-ftw standard mode) -------------",
-            "SecAuditEngine RelevantOnly",
-            'SecAuditLogRelevantStatus "^(?:5|4(?!04))"',
-            "SecAuditLogParts ABIJDEFHZ",
-            "SecAuditLogType Serial",
-            "SecAuditLog $auditLogPath"
-          )
-          Add-Content -Path $modSecurityConfigFile -Value $auditConfig
-
-          # go-ftw standard mode marker rule: write the X-CRS-Test header value to the
-          # audit log so go-ftw can delimit individual test transactions.
-          # 'auditlog' is required because with SecAuditEngine RelevantOnly a plain
-          # 'log' action is not enough to force the (200 status) marker transaction
-          # into the audit log when albedo serves as the backend.
-          $markerRule = @(
-            "",
-            "# go-ftw log marker",
-            'SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" "id:999999,pass,phase:1,auditlog,msg:''X-CRS-Test %{MATCHED_VAR}'',ctl:ruleRemoveById=1-999999"'
-          )
-          Add-Content -Path $modSecurityConfigFile -Value $markerRule
+          Add-Content -Path $modSecurityConfigFile -Value (Get-Content -Path "$testConfigDir\audit-logging.conf")
 
         }
         catch {
@@ -478,11 +454,11 @@ jobs:
             $goBinPath = Join-Path $env:USERPROFILE "go\bin"
         }
 
-        # Test selection and IIS-specific skips live in .ftw.yaml:
+        # Test selection and IIS-specific skips live in iis/tests/ftw.yaml:
         #   include  -> which rule families run (build smoke scope)
         #   testoverride.ignore -> tests that cannot hold on IIS/HTTP.SYS
         # go-ftw's include wins over its exclude, so the ignore map is used.
-        & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\.ftw.yaml" --show-failures-only
+        & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\iis\tests\ftw.yaml" --show-failures-only
         $exitCode = $LASTEXITCODE
         Write-Host "go-ftw exit code: $exitCode"
         $auditLogPath = "c:\inetpub\logs\modsec_audit.log"
