@@ -479,8 +479,20 @@ jobs:
         }
 
         Write-Host "======== DIAGNOSTIC: rule 920 family ========"
-        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir" --config "${{ github.workspace }}\.ftw.yaml" -i "^920" --debug 2>&1
-        Write-Host "DIAGNOSTIC exit code: $LASTEXITCODE"
+        # Capture stdout and stderr into separate files. go-ftw writes test progress
+        # and the raw request/response bytes to stdout, while zerolog debug messages
+        # (the "DBG ftw/http: ..." lines) go to stderr. Merging them with 2>&1 makes
+        # per-test attribution unreliable, so keep the streams apart for analysis.
+        & "$goBinPath\go-ftw.exe" run -d "$testRuleDir" --config "${{ github.workspace }}\.ftw.yaml" -i "^920" --debug --show-failures-only `
+            1> "${{ github.workspace }}\ftw-920-diag.out.log" `
+            2> "${{ github.workspace }}\ftw-920-diag.err.log"
+        $diagExit = $LASTEXITCODE
+        Write-Host "DIAGNOSTIC exit code: $diagExit"
+        if (Test-Path "${{ github.workspace }}\ftw-920-diag.out.log") {
+            Write-Host "--- DIAGNOSTIC STDOUT (test results) ---"
+            Select-String -Path "${{ github.workspace }}\ftw-920-diag.out.log" -Pattern "failed in|passed in" | ForEach-Object { Write-Host $_.Line }
+            Write-Host "--- END DIAGNOSTIC STDOUT ---"
+        }
         Write-Host "======== END DIAGNOSTIC 920 ========"
 
         & "$goBinPath\go-ftw.exe" run -d $testRuleDir --config "${{ github.workspace }}\.ftw.yaml" -i "^920" --show-failures-only
@@ -488,9 +500,21 @@ jobs:
         Write-Host "go-ftw exit code: $exitCode"
         $auditLogPath = "c:\inetpub\logs\modsec_audit.log"
         if (Test-Path -LiteralPath $auditLogPath) {
-            Write-Host "Audit log size after run: $((Get-Item -LiteralPath $auditLogPath).Length) bytes"
+            Copy-Item -LiteralPath $auditLogPath -Destination "${{ github.workspace }}\modsec_audit.log" -Force
+            Write-Host "Audit log copied for upload: $((Get-Item -LiteralPath $auditLogPath).Length) bytes"
             Write-Host "--- TAIL OF AUDIT LOG AFTER go-ftw ---"
             Get-Content -LiteralPath $auditLogPath -Tail 40
         }
         exit $exitCode
+
+    - name: Upload FTW logs and audit log
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ftw-logs-${{ matrix.config }}
+        path: |
+          ${{ github.workspace }}/ftw-920-diag.out.log
+          ${{ github.workspace }}/ftw-920-diag.err.log
+          ${{ github.workspace }}/modsec_audit.log
 
