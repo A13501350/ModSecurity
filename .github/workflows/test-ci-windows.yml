@@ -478,12 +478,11 @@ jobs:
             $goBinPath = Join-Path $env:USERPROFILE "go\bin"
         }
 
-        # go-ftw matches -i / -e against the test IdString() (i.e. "<ruleId>-<testId>").
-        # IIS/HTTP.SYS behavior differs from Apache in 16 rule-920 tests; the module
-        # under test is not at fault. These are skipped (rather than overridden) so
-        # the suite always verifies genuine, unmodified expectations. The include
-        # and exclude regexes live in .ftw.yaml (go-ftw rejects -i + -e together on
-        # the CLI); see there for the per-test rationale.
+        # The 920-family test selection lives in .ftw.yaml (`include`) together with
+        # `testoverride.ignore` entries for the 16 tests whose expectations cannot
+        # hold on IIS/HTTP.SYS (module not at fault). go-ftw's include always wins
+        # over its exclude, so the ignore map is the supported way to skip them;
+        # see .ftw.yaml for the per-test rationale.
         Write-Host "======== DIAGNOSTIC: rule 920 family ========"
         # Capture stdout and stderr into separate files. go-ftw writes test progress
         # and the raw request/response bytes to stdout, while zerolog debug messages
