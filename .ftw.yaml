@@ -22,6 +22,7 @@ testoverride:
     "^920430-8$": "HTTP.SYS returns 505 for HTTP/4.0"
     "^920520-7$": "HTTP.SYS rejects malformed Accept-Encoding with 400"
     "^920620-1$": "HTTP.SYS rejects duplicate Content-Type with 400"
+    "^941101-2$": "URI contains double quotes; HTTP.SYS rejects it before the module runs"
 
 # Build smoke scope: run a representative subset of rule families, not the full CRS suite.
 include: "^(913|920|930|941)"
