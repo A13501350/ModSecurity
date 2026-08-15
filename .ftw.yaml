@@ -6,24 +6,22 @@ testoverride:
     dest_addr: "localhost"
     port: 80
     protocol: "http"
-  # Skip the 16 tests whose expectations cannot hold on IIS/HTTP.SYS even though
-  # the module behaves correctly. Each key is a regex matched against the test
-  # IdString() "<ruleId>-<testId>"; the value documents why it is ignored.
-  # (go-ftw's include always wins over exclude, so ignore is used instead of
-  # an `exclude` key - see runner/run.go needToSkipTest.)
+  # Tests skipped because IIS/HTTP.SYS behavior differs from the Apache CRS
+  # baseline (module under test is not at fault). Key: test IdString() regex;
+  # value: reason. See runner/run.go needToSkipTest (include wins over exclude,
+  # hence ignore is used instead of an `exclude` key).
   ignore:
-    "^920100-(2|8|12)$": "HTTP.SYS accepts leading whitespace / colon-in-path request lines that Apache rejects with 400"
-    "^920100-(10|14)$": "unknown verbs map to method INVALID, so the rebuilt request line matches 920100's whitelist regex and the rule cannot fire (iis/mymodule.cpp request_line build)"
-    "^920100-4$": "HTTP.SYS rejects a valid CONNECT request line with 400"
-    "^920180-(1|3)$": "HTTP.SYS rejects CL-less POST with 411 before the module runs, so 920180 can never match"
-    "^920181-1$": "ARR returns 502 when both CL and TE are present, and the module does fire 920181 (Apache strips CL, so the CRS baseline differs)"
-    "^920200-4$": "HTTP.SYS rejects the malformed Range header with 400 before the module runs"
-    "^920290-1$": "HTTP.SYS accepts an empty Host header (200) that Apache rejects with 400"
-    "^920350-(1|3)$": "HTTP.SYS rejects IP-address Host headers with 400 before the module runs"
-    "^920430-8$": "HTTP.SYS returns 505 for HTTP/4.0 before the module runs"
-    "^920520-7$": "HTTP.SYS rejects the malformed Accept-Encoding (CVE-2022-21907) with 400 before the module runs"
-    "^920620-1$": "HTTP.SYS rejects duplicate Content-Type headers with 400 before the module runs"
+    "^920100-(2|8|12)$": "HTTP.SYS accepts request lines Apache rejects with 400"
+    "^920100-(10|14)$": "unknown verb becomes method INVALID; rebuilt request line matches 920100 whitelist regex"
+    "^920100-4$": "HTTP.SYS rejects CONNECT with 400"
+    "^920180-(1|3)$": "HTTP.SYS rejects CL-less POST with 411 before the module runs"
+    "^920181-1$": "ARR returns 502 on CL+TE and 920181 fires (Apache strips CL)"
+    "^920200-4$": "HTTP.SYS rejects malformed Range with 400"
+    "^920290-1$": "HTTP.SYS accepts empty Host (200) that Apache rejects with 400"
+    "^920350-(1|3)$": "HTTP.SYS rejects IP Host header with 400"
+    "^920430-8$": "HTTP.SYS returns 505 for HTTP/4.0"
+    "^920520-7$": "HTTP.SYS rejects malformed Accept-Encoding with 400"
+    "^920620-1$": "HTTP.SYS rejects duplicate Content-Type with 400"
 
-# Scope the regression run to the 920 request/headers family. This is a build
-# smoke test, not a full CRS compliance run.
-include: "^920"
+# Build smoke scope: run a representative subset of rule families, not the full CRS suite.
+include: "^(913|920|930|941)"
