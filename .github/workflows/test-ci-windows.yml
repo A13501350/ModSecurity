@@ -252,6 +252,10 @@ jobs:
           )
           Add-Content -Path $modSecurityConfigFile -Value $dupHeaderTestRules
 
+          # Audit log for diagnosing what headers ModSecurity actually sees
+          Add-Content -Path "$modSecurityConfigDir\modsecurity.conf" -Value 'SecAuditEngine On'
+          Add-Content -Path "$modSecurityConfigDir\modsecurity.conf" -Value 'SecAuditLog C:\Windows\Temp\modsec_audit.log'
+
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
         }
@@ -354,6 +358,17 @@ jobs:
                 Write-Host "ERROR: $($test.Description) - request failed: $($_.Exception.Message)"
                 $dupHeaderFailed = $true
             }
+        }
+
+        # Dump audit log excerpts to verify what headers ModSecurity saw
+        $auditLog = "C:\Windows\Temp\modsec_audit.log"
+        if (Test-Path $auditLog) {
+            Write-Host "--- modsec_audit.log (part B request headers excerpts) ---"
+            Select-String -Path $auditLog -Pattern 'MyCustomHeaderName|--[0-9a-f]+--B--' |
+                Select-Object -Last 40 | ForEach-Object { $_.Line }
+        }
+        else {
+            Write-Host "modsec_audit.log not found"
         }
 
         if ($dupHeaderFailed) {
