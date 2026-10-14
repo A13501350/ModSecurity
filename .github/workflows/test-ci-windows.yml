@@ -242,6 +242,15 @@ jobs:
 
           Add-Content -Path $modSecurityConfigFile -Value $crsRules
 
+          # Temporary regression test rules for issue #729 (redirect response
+          # without Location header on IIS). Not for upstream.
+          # 99999 covers the request phase, 99998 the response phase.
+          $redirectTestRules = @(
+            'SecRule ARGS:redir_arg "@streq foo" "id:99999,phase:2,pass,redirect:/"',
+            'SecRule REQUEST_URI "@streq /iisstart.htm" "id:99998,phase:4,pass,redirect:/"'
+          )
+          Add-Content -Path $modSecurityConfigFile -Value $redirectTestRules
+
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
         }
@@ -292,6 +301,55 @@ jobs:
             }
         }
         
+
+        # Regression tests for issue #729: a redirect intervention must return
+        # 302 together with a Location header. Invoke-WebRequest follows
+        # redirects, so use HttpClient with AllowAutoRedirect disabled to
+        # inspect the raw response.
+        $redirectTestCases = @(
+            @{Url = "http://localhost/?redir_arg=foo"; Description = "Redirect action (request phase)"},
+            @{Url = "http://localhost/iisstart.htm"; Description = "Redirect action (response phase)"}
+        )
+
+        $redirectFailed = $false
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+        $handler.AllowAutoRedirect = $false
+        $client = [System.Net.Http.HttpClient]::new($handler)
+
+        foreach ($test in $redirectTestCases) {
+            try {
+                $response = $client.GetAsync($test.Url).GetAwaiter().GetResult()
+                $statusCode = [int]$response.StatusCode
+                $location = $null
+
+                if ($response.Headers.Contains("Location")) {
+                    $location = ($response.Headers.GetValues("Location") | Select-Object -First 1)
+                }
+
+                if ($statusCode -eq 302 -and $location -eq "/") {
+                    Write-Host "PASS: $($test.Description) - returned 302 with Location: $location"
+                }
+                elseif ($statusCode -eq 302) {
+                    Write-Host "FAIL: $($test.Description) - returned 302 but Location header is missing or wrong ('$location')"
+                    $redirectFailed = $true
+                }
+                else {
+                    Write-Host "FAIL: $($test.Description) - expected 302 but got $statusCode"
+                    $redirectFailed = $true
+                }
+            }
+            catch {
+                Write-Host "ERROR: $($test.Description) - request failed: $($_.Exception.Message)"
+                $redirectFailed = $true
+            }
+        }
+
+        $client.Dispose()
+        $handler.Dispose()
+
+        if ($redirectFailed) {
+            exit 1
+        }
 
         # Check event log
         $badMessagePattern = 'Failed to find the RegisterModule entrypoint|The description for Event ID|The data is the error|dll failed to load'
