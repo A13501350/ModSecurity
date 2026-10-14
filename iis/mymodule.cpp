@@ -671,6 +671,18 @@ Finished:
 	{
 		pHttpContext->GetResponse()->Clear();
 		pHttpContext->GetResponse()->SetStatus(status, "ModSecurity Action");
+
+		// propagate headers set by the intervention (e.g. "Location"
+		// for redirect actions) to the IIS response
+		//
+		const char *location = apr_table_get(rsc->m_pRequestRec->headers_out, "Location");
+
+		if(location != NULL)
+		{
+			pHttpContext->GetResponse()->SetHeader(
+				HttpHeaderLocation, location, (USHORT)strlen(location), TRUE);
+		}
+
 		pHttpContext->SetRequestHandled();
 
 		rsc->FinishRequest();
@@ -1068,6 +1080,18 @@ CMyHttpModule::OnBeginRequest(
 	if(status != DECLINED)
 	{
 		pHttpContext->GetResponse()->SetStatus(status, "ModSecurity Action");
+
+		// propagate headers set by the intervention (e.g. "Location"
+		// for redirect actions) to the IIS response
+		//
+		const char *location = apr_table_get(r->headers_out, "Location");
+
+		if(location != NULL)
+		{
+			pHttpContext->GetResponse()->SetHeader(
+				HttpHeaderLocation, location, (USHORT)strlen(location), TRUE);
+		}
+
 		pHttpContext->SetRequestHandled();
 
 		hr = E_FAIL;
