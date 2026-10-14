@@ -242,6 +242,15 @@ jobs:
 
           Add-Content -Path $modSecurityConfigFile -Value $crsRules
 
+          # Temporary regression test rules for issue #2991 (duplicate
+          # response headers lost on IIS). Not for upstream.
+          # The test page emits two MyCustomHeaderName headers, so the count
+          # must be > 1. Before the fix only one survives => rule never fires.
+          $dupHeaderTestRules = @(
+            'SecRule &RESPONSE_HEADERS:/MyCustomHeaderName/ "@gt 1" "id:29910,phase:3,deny,status:403,msg:Duplicate response headers detected"'
+          )
+          Add-Content -Path $modSecurityConfigFile -Value $dupHeaderTestRules
+
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
         }
@@ -254,6 +263,25 @@ jobs:
       shell: pwsh
       run: |
         $iisConfigDir = "C:\Program Files\ModSecurity IIS\"
+
+        # Regression test for issue #2991: ModSecurity must see every
+        # duplicate response header, not just the last one. An ASPX page
+        # emits two MyCustomHeaderName headers via AppendHeader; rule 29910
+        # (phase 3, &RESPONSE_HEADERS "@gt 1") must then deny with 403.
+        # The baseline request to / carries no such header and must stay 200.
+        # ASP.NET and the page must be in place before W3SVC restarts so the
+        # handler mappings are picked up.
+        Enable-WindowsOptionalFeature -Online -FeatureName IIS-ASPNET45 -All -NoRestart -ErrorAction SilentlyContinue | Out-Null
+
+        $aspxContent = @(
+            '<%@ Page Language="C#" %>',
+            '<%',
+            '    Response.AppendHeader("MyCustomHeaderName", "value1");',
+            '    Response.AppendHeader("MyCustomHeaderName", "value2");',
+            '%>',
+            '<html><body>dup headers</body></html>'
+        ) -join "`n"
+        Set-Content -Path "C:\inetpub\wwwroot\test-dup-headers.aspx" -Value $aspxContent -Encoding UTF8
 
         Restart-Service W3SVC -Force
 
@@ -292,6 +320,39 @@ jobs:
             }
         }
         
+
+        # Regression test for issue #2991: ModSecurity must see every
+        # duplicate response header, not just the last one. An ASPX page
+        # emits two MyCustomHeaderName headers via AppendHeader; rule 29910
+        # (phase 3, &RESPONSE_HEADERS "@gt 1") must then deny with 403.
+        # The baseline request to / carries no such header and must stay 200.
+        $dupHeaderFailed = $false
+        $dupHeaderTestCases = @(
+            @{Url = "http://localhost/test-dup-headers.aspx"; Description = "Duplicate response headers visible (issue #2991)"; ExpectedCode = 403},
+            @{Url = "http://localhost/"; Description = "No duplicate headers (control)"; ExpectedCode = 200}
+        )
+
+        foreach ($test in $dupHeaderTestCases) {
+            try {
+                $response = Invoke-WebRequest $test.Url -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
+
+                if ($response.StatusCode -eq $test.ExpectedCode) {
+                    Write-Host "PASS: $($test.Description) - returned $($response.StatusCode)"
+                }
+                else {
+                    Write-Host "FAIL: $($test.Description) - expected $($test.ExpectedCode) but got $($response.StatusCode)"
+                    $dupHeaderFailed = $true
+                }
+            }
+            catch {
+                Write-Host "ERROR: $($test.Description) - request failed: $($_.Exception.Message)"
+                $dupHeaderFailed = $true
+            }
+        }
+
+        if ($dupHeaderFailed) {
+            exit 1
+        }
 
         # Check event log
         $badMessagePattern = 'Failed to find the RegisterModule entrypoint|The description for Event ID|The data is the error|dll failed to load'
