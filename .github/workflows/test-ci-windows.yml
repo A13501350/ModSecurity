@@ -245,11 +245,19 @@ jobs:
           # Temporary regression test rules for issue #729 (redirect response
           # without Location header on IIS). Not for upstream.
           # 99999 covers the request phase, 99998 the response phase.
+          # 99997/99996 are phase 3/4 deny probes to isolate response-phase
+          # processing from the redirect action itself.
           $redirectTestRules = @(
             'SecRule ARGS:redir_arg "@streq foo" "id:99999,phase:2,pass,redirect:/"',
-            'SecRule REQUEST_URI "@streq /iisstart.htm" "id:99998,phase:4,pass,redirect:/"'
+            'SecRule REQUEST_URI "@streq /iisstart.htm" "id:99998,phase:4,pass,redirect:/"',
+            'SecRule ARGS:probe3 "@streq 1" "id:99997,phase:3,deny,status:403"',
+            'SecRule ARGS:probe4 "@streq 1" "id:99996,phase:4,deny,status:403"'
           )
           Add-Content -Path $modSecurityConfigFile -Value $redirectTestRules
+
+          # Debug log for diagnosing response-phase processing in CI
+          Add-Content -Path "$modSecurityConfigDir\modsecurity.conf" -Value 'SecDebugLog C:\Windows\Temp\modsec_debug.log'
+          Add-Content -Path "$modSecurityConfigDir\modsecurity.conf" -Value 'SecDebugLogLevel 9'
 
           (Get-Content -Path $modSecurityConfigDir\modsecurity.conf) -replace 'SecRuleEngine DetectionOnly', 'SecRuleEngine On' | Set-Content -Path $modSecurityConfigDir\modsecurity.conf
 
@@ -305,10 +313,13 @@ jobs:
         # Regression tests for issue #729: a redirect intervention must return
         # 302 together with a Location header. Invoke-WebRequest follows
         # redirects, so use HttpClient with AllowAutoRedirect disabled to
-        # inspect the raw response.
+        # inspect the raw response. Phase 3/4 deny probes isolate
+        # response-phase processing from the redirect action itself.
         $redirectTestCases = @(
-            @{Url = "http://localhost/?redir_arg=foo"; Description = "Redirect action (request phase)"},
-            @{Url = "http://localhost/iisstart.htm"; Description = "Redirect action (response phase)"}
+            @{Url = "http://localhost/?redir_arg=foo"; Description = "Redirect action (request phase)"; ExpectedCode = 302; ExpectedLocation = "/"},
+            @{Url = "http://localhost/iisstart.htm"; Description = "Redirect action (response phase)"; ExpectedCode = 302; ExpectedLocation = "/"},
+            @{Url = "http://localhost/?probe3=1"; Description = "Deny action (response headers probe)"; ExpectedCode = 403},
+            @{Url = "http://localhost/?probe4=1"; Description = "Deny action (response body probe)"; ExpectedCode = 403}
         )
 
         $redirectFailed = $false
@@ -326,15 +337,13 @@ jobs:
                     $location = ($response.Headers.GetValues("Location") | Select-Object -First 1)
                 }
 
-                if ($statusCode -eq 302 -and $location -eq "/") {
-                    Write-Host "PASS: $($test.Description) - returned 302 with Location: $location"
-                }
-                elseif ($statusCode -eq 302) {
-                    Write-Host "FAIL: $($test.Description) - returned 302 but Location header is missing or wrong ('$location')"
-                    $redirectFailed = $true
+                $locationOk = (-not $test.ContainsKey("ExpectedLocation")) -or ($location -eq $test.ExpectedLocation)
+
+                if ($statusCode -eq $test.ExpectedCode -and $locationOk) {
+                    Write-Host "PASS: $($test.Description) - returned $statusCode$(if ($location) { " with Location: $location" })"
                 }
                 else {
-                    Write-Host "FAIL: $($test.Description) - expected 302 but got $statusCode"
+                    Write-Host "FAIL: $($test.Description) - expected $($test.ExpectedCode)$(if ($test.ContainsKey('ExpectedLocation')) { " with Location: $($test.ExpectedLocation)" }) but got $statusCode$(if ($location) { " with Location: $location" } else { " without Location" })"
                     $redirectFailed = $true
                 }
             }
@@ -346,6 +355,17 @@ jobs:
 
         $client.Dispose()
         $handler.Dispose()
+
+        # Dump debug log excerpts to diagnose response-phase processing
+        $debugLog = "C:\Windows\Temp\modsec_debug.log"
+        if (Test-Path $debugLog) {
+            Write-Host "--- modsec_debug.log (filtered excerpts) ---"
+            Select-String -Path $debugLog -Pattern '9999[6-9]|Starting phase|Output filter|redirection|Access denied|resbody' |
+                Select-Object -Last 150 | ForEach-Object { $_.Line }
+        }
+        else {
+            Write-Host "modsec_debug.log not found"
+        }
 
         if ($redirectFailed) {
             exit 1
