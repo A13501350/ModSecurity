@@ -45,6 +45,7 @@ class REQUEST_STORED_CONTEXT : public IHttpStoredContext
 		m_pResponseBuffer = NULL;
 		m_pResponseLength = 0;
 		m_pResponsePosition = 0;
+		m_bResponseProcessed = FALSE;
 	}
 
     ~REQUEST_STORED_CONTEXT()
@@ -83,6 +84,7 @@ class REQUEST_STORED_CONTEXT : public IHttpStoredContext
 	char				*m_pResponseBuffer;
 	ULONGLONG			m_pResponseLength;
 	ULONGLONG			m_pResponsePosition;
+	BOOL				m_bResponseProcessed;
 };
 
 
@@ -432,12 +434,13 @@ CMyHttpModule::OnSendResponse(
 		char dbgbuf[512];
 		HTTP_RESPONSE *pDbgRaw = pHttpContext->GetResponse() ? pHttpContext->GetResponse()->GetRawHttpResponse() : NULL;
 		sprintf_s(dbgbuf, sizeof(dbgbuf),
-			"DBG OnSendResponse entry: rsc=%p rec=%p buf=%p resbody_access=%d chunks=%d",
+			"DBG OnSendResponse entry: rsc=%p rec=%p buf=%p resbody_access=%d chunks=%d flags=0x%x",
 			(void *)rsc,
 			rsc ? (void *)rsc->m_pRequestRec : NULL,
 			rsc ? (void *)rsc->m_pResponseBuffer : NULL,
 			(rsc && rsc->m_pRequestRec) ? modsecIsResponseBodyAccessEnabled(rsc->m_pRequestRec) : -1,
-			pDbgRaw ? (int)pDbgRaw->EntityChunkCount : -1);
+			pDbgRaw ? (int)pDbgRaw->EntityChunkCount : -1,
+			pResponseProvider->GetFlags());
 		WriteEventViewerLog(dbgbuf, EVENTLOG_INFORMATION_TYPE);
 	}
 
@@ -467,9 +470,25 @@ CMyHttpModule::OnSendResponse(
 	// here we must add handling of chunked response
 	// apparently IIS 7 calls this handler once per chunk
 	// see: http://stackoverflow.com/questions/4385249/how-to-buffer-and-process-chunked-data-before-sending-headers-in-iis7-native-mod
+	//
+	// IIS 10+ (and kernel-cached responses) may invoke OnSendResponse only
+	// for the header flush, with the entity chunks never appearing in any
+	// call. In that case run the response phases once in headers-only mode
+	// so that phase 3/4 interventions (e.g. redirect/deny) are not silently
+	// dropped (issue #729). When more data is announced, wait for the call
+	// that carries the entity chunks.
+	//
+	BOOL fHeadersOnly = FALSE;
 
 	if(pRawHttpResponse->EntityChunkCount == 0)
-		goto Exit;
+	{
+		DWORD dwEntryFlags = pResponseProvider->GetFlags();
+
+		if((dwEntryFlags & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) != 0 || rsc->m_bResponseProcessed)
+			goto Exit;
+
+		fHeadersOnly = TRUE;
+	}
 
 	// here we must transfer response headers
 	//
@@ -601,7 +620,10 @@ CMyHttpModule::OnSendResponse(
         }
     }
 
-	rsc->m_pResponseBuffer = (char *)apr_palloc(rsc->m_pRequestRec->pool, ulTotalLength);
+	if(!fHeadersOnly)
+	{
+		rsc->m_pResponseBuffer = (char *)apr_palloc(rsc->m_pRequestRec->pool, ulTotalLength);
+	}
 
 	ulTotalLength = 0;
 
@@ -645,7 +667,7 @@ CMyHttpModule::OnSendResponse(
 
     DWORD dwFlags = pResponseProvider->GetFlags();
 
-	if (pResponseProvider->GetHeadersBeingSent() && 
+	if (!fHeadersOnly && pResponseProvider->GetHeadersBeingSent() &&
          (dwFlags & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) == 0 &&
          pHttpContext->GetResponse()->GetHeader(HttpHeaderContentLength) == NULL)    
     {
@@ -671,9 +693,15 @@ CMyHttpModule::OnSendResponse(
 
         if(FAILED(hr))
         {
-            goto Finished;      
+            goto Finished;
         }
     }
+
+	// mark the response as processed so that subsequent headers-only
+	// OnSendResponse invocations for this request do not re-run the
+	// response phases
+	//
+	rsc->m_bResponseProcessed = TRUE;
 
 Finished:
 
