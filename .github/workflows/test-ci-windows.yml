@@ -243,14 +243,18 @@ jobs:
           Add-Content -Path $modSecurityConfigFile -Value $crsRules
 
           # Temporary regression test rules for issue #2991 (duplicate
-          # headers lost on IIS). Not for upstream.
-          # Request-side: the client sends two MyCustomHeaderName request
-          # headers; the count must be > 1. Before the fix only one survives
-          # in headers_in => rule never fires.
+          # response headers lost on IIS). Not for upstream.
+          # The test page emits two MyCustomHeaderName response headers, so
+          # the count must be > 1. Before the fix only one survives in
+          # headers_out => rule never fires. SecResponseBodyAccess must be On
+          # or OnSendResponse exits before headers are transferred.
           $dupHeaderTestRules = @(
-            'SecRule &REQUEST_HEADERS:/MyCustomHeaderName/ "@gt 1" "id:29910,phase:1,deny,status:403,msg:Duplicate request headers detected"'
+            'SecRule &RESPONSE_HEADERS:/MyCustomHeaderName/ "@gt 1" "id:29910,phase:3,deny,status:403,msg:Duplicate response headers detected"'
           )
           Add-Content -Path $modSecurityConfigFile -Value $dupHeaderTestRules
+
+          # Response body access is required for response-phase processing
+          Add-Content -Path "$modSecurityConfigDir\modsecurity.conf" -Value 'SecResponseBodyAccess On'
 
           # Audit log for diagnosing what headers ModSecurity actually sees
           Add-Content -Path "$modSecurityConfigDir\modsecurity.conf" -Value 'SecAuditEngine On'
@@ -268,6 +272,24 @@ jobs:
       shell: pwsh
       run: |
         $iisConfigDir = "C:\Program Files\ModSecurity IIS\"
+
+        # Regression test for issue #2991: ModSecurity must see every
+        # duplicate response header, not just the last one. An ASPX page
+        # emits two MyCustomHeaderName headers via AppendHeader; rule 29910
+        # (phase 3, &RESPONSE_HEADERS "@gt 1") must then deny with 403.
+        # ASP.NET and the page must be in place before W3SVC restarts so the
+        # handler mappings are picked up.
+        Enable-WindowsOptionalFeature -Online -FeatureName IIS-ASPNET45 -All -NoRestart -ErrorAction SilentlyContinue | Out-Null
+
+        $aspxContent = @(
+            '<%@ Page Language="C#" %>',
+            '<%',
+            '    Response.AppendHeader("MyCustomHeaderName", "value1");',
+            '    Response.AppendHeader("MyCustomHeaderName", "value2");',
+            '%>',
+            '<html><body>dup headers</body></html>'
+        ) -join "`n"
+        Set-Content -Path "C:\inetpub\wwwroot\test-dup-headers.aspx" -Value $aspxContent -Encoding UTF8
 
         Restart-Service W3SVC -Force
 
@@ -308,49 +330,26 @@ jobs:
         
 
         # Regression test for issue #2991: ModSecurity must see every
-        # duplicate request header, not just the last one. Rule 29910
-        # (phase 1, &REQUEST_HEADERS "@gt 1") must deny with 403.
-        # Raw TCP sockets are used because HttpWebRequest.Headers.Add()
-        # coalesces same-name headers into a single comma-joined line,
-        # which would defeat the test. The control request carries no
-        # duplicate header and must stay 200.
+        # duplicate response header, not just the last one. The ASPX page
+        # emits two MyCustomHeaderName headers; rule 29910 (phase 3,
+        # &RESPONSE_HEADERS "@gt 1") must then deny with 403.
+        # The baseline request to / carries no such header and must stay 200.
         $dupHeaderFailed = $false
 
         $dupHeaderTestCases = @(
-            @{Raw = "GET / HTTP/1.1`r`nHost: localhost`r`nMyCustomHeaderName: value1`r`nMyCustomHeaderName: value2`r`nConnection: close`r`n`r`n"; Description = "Duplicate request headers visible (issue #2991)"; ExpectedCode = 403},
-            @{Raw = "GET / HTTP/1.1`r`nHost: localhost`r`nConnection: close`r`n`r`n"; Description = "No duplicate request headers (control)"; ExpectedCode = 200}
+            @{Url = "http://localhost/test-dup-headers.aspx"; Description = "Duplicate response headers visible (issue #2991)"; ExpectedCode = 403},
+            @{Url = "http://localhost/"; Description = "No duplicate response headers (control)"; ExpectedCode = 200}
         )
 
         foreach ($test in $dupHeaderTestCases) {
             try {
-                $client = [System.Net.Sockets.TcpClient]::new()
-                $client.ReceiveTimeout = 15000
-                $client.SendTimeout = 15000
-                $client.Connect("127.0.0.1", 80)
-                $stream = $client.GetStream()
-                $bytes = [System.Text.Encoding]::ASCII.GetBytes($test.Raw)
-                $stream.Write($bytes, 0, $bytes.Length)
-                $stream.Flush()
+                $response = Invoke-WebRequest $test.Url -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
 
-                $responseText = ""
-                $buf = New-Object byte[] 8192
-                try {
-                    while (($read = $stream.Read($buf, 0, $buf.Length)) -gt 0) {
-                        $responseText += [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
-                        if ($responseText.Contains("`r`n`r`n")) { break }
-                    }
-                }
-                catch [System.IO.IOException] { }
-                $client.Close()
-
-                $statusLine = ($responseText -split "`r`n")[0]
-                $statusCode = [int]($statusLine.Split(' ')[1])
-
-                if ($statusCode -eq $test.ExpectedCode) {
-                    Write-Host "PASS: $($test.Description) - returned $statusCode"
+                if ($response.StatusCode -eq $test.ExpectedCode) {
+                    Write-Host "PASS: $($test.Description) - returned $($response.StatusCode)"
                 }
                 else {
-                    Write-Host "FAIL: $($test.Description) - expected $($test.ExpectedCode) but got $statusCode"
+                    Write-Host "FAIL: $($test.Description) - expected $($test.ExpectedCode) but got $($response.StatusCode)"
                     $dupHeaderFailed = $true
                 }
             }
@@ -363,9 +362,9 @@ jobs:
         # Dump audit log excerpts to verify what headers ModSecurity saw
         $auditLog = "C:\Windows\Temp\modsec_audit.log"
         if (Test-Path $auditLog) {
-            Write-Host "--- modsec_audit.log (part B request headers excerpts) ---"
-            Select-String -Path $auditLog -Pattern 'MyCustomHeaderName|--[0-9a-f]+--B--' |
-                Select-Object -Last 40 | ForEach-Object { $_.Line }
+            Write-Host "--- modsec_audit.log (MyCustomHeaderName excerpts) ---"
+            Select-String -Path $auditLog -Pattern 'MyCustomHeaderName' |
+                Select-Object -Last 20 | ForEach-Object { $_.Line }
         }
         else {
             Write-Host "modsec_audit.log not found"
