@@ -361,8 +361,8 @@ jobs:
         $debugLog = "C:\Windows\Temp\modsec_debug.log"
         if (Test-Path $debugLog) {
             Write-Host "--- modsec_debug.log (filtered excerpts) ---"
-            Select-String -Path $debugLog -Pattern '9999[4-9]|Matched|Internal Error|Starting phase|Access denied|Output filter|redirection|Target value' |
-                Select-Object -Last 250 | ForEach-Object { $_.Line }
+            Select-String -Path $debugLog -Pattern 'Rule 9999|Access denied|Internal Error|Starting phase|Output filter' |
+                Select-Object -Last 120 | ForEach-Object { $_.Line }
         }
         else {
             Write-Host "modsec_debug.log not found"

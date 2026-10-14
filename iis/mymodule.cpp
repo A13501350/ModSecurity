@@ -753,12 +753,14 @@ Finished:
 		return RQ_NOTIFICATION_FINISH_REQUEST;
 	}
 Exit:
-	// The request_rec is intentionally NOT finished here: IIS may fire
-	// SEND_RESPONSE multiple times and the logging phase still needs the
-	// request_rec. Release happens in OnPostEndRequest instead, which runs
-	// after the response has been fully sent (the FinishRequest above in
-	// the intervention path stays, since the request ends right there).
+	// temporary hack, in reality OnSendRequest theoretically could possibly come before OnEndRequest.
+	// IIS 10 fires POST_END_REQUEST *before* SEND_RESPONSE for kernel-cached responses, so releasing
+	// the request_rec only in OnPostEndRequest would leave nothing for OnSendResponse to process.
+	// This FinishRequest (which also runs the logging phase) is the only reliable release point.
 	//
+	if(rsc != NULL)
+		rsc->FinishRequest();
+
 	LeaveCriticalSection(&m_csLock);
 
 	return RQ_NOTIFICATION_CONTINUE;
@@ -774,12 +776,9 @@ CMyHttpModule::OnPostEndRequest(
 
 	rsc = (REQUEST_STORED_CONTEXT *)pHttpContext->GetModuleContextContainer()->GetModuleContext(g_pModuleContext);
 
-	// finish the request (which also runs the logging phase) for any
-	// request_rec still alive, covering both the buffered path (where
-	// OnSendResponse processed the response body) and the headers-only
-	// path
+	// only finish request if OnSendResponse have been called already
 	//
-	if(rsc != NULL && rsc->m_pRequestRec != NULL)
+	if(rsc != NULL && rsc->m_pResponseBuffer != NULL)
 	{
 		EnterCriticalSection(&m_csLock);
 
@@ -1109,6 +1108,19 @@ CMyHttpModule::OnBeginRequest(
 
 	r->unparsed_uri = ZeroTerminate(req->pRawUrl, req->RawUrlLength, r->pool);
 	r->uri = r->unparsed_uri;
+
+	// TEMP-DEBUG (local CI only, not for upstream): trace transaction creation
+	{
+		char dbgbuf[640];
+		sprintf_s(dbgbuf, sizeof(dbgbuf),
+			"DBG OnBeginRequest: rec=%p requestId=%llu method=%s uri=%s args=%s",
+			(void *)r,
+			(unsigned long long)req->RequestId,
+			r->method ? r->method : "(null)",
+			r->uri ? r->uri : "(null)",
+			r->args ? r->args : "(empty)");
+		WriteEventViewerLog(dbgbuf, EVENTLOG_INFORMATION_TYPE);
+	}
 
 	r->the_request = (char *)apr_palloc(r->pool, strlen(r->method) + 1 + req->RawUrlLength + 1 + strlen(r->protocol) + 1);
 
