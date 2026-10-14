@@ -427,6 +427,20 @@ CMyHttpModule::OnSendResponse(
 
 	rsc = (REQUEST_STORED_CONTEXT *)pHttpContext->GetModuleContextContainer()->GetModuleContext(g_pModuleContext);
 
+	// TEMP-DEBUG (local CI only, not for upstream): trace response-phase processing
+	{
+		char dbgbuf[512];
+		HTTP_RESPONSE *pDbgRaw = pHttpContext->GetResponse() ? pHttpContext->GetResponse()->GetRawHttpResponse() : NULL;
+		sprintf_s(dbgbuf, sizeof(dbgbuf),
+			"DBG OnSendResponse entry: rsc=%p rec=%p buf=%p resbody_access=%d chunks=%d",
+			(void *)rsc,
+			rsc ? (void *)rsc->m_pRequestRec : NULL,
+			rsc ? (void *)rsc->m_pResponseBuffer : NULL,
+			(rsc && rsc->m_pRequestRec) ? modsecIsResponseBodyAccessEnabled(rsc->m_pRequestRec) : -1,
+			pDbgRaw ? (int)pDbgRaw->EntityChunkCount : -1);
+		WriteEventViewerLog(dbgbuf, EVENTLOG_INFORMATION_TYPE);
+	}
+
 	EnterCriticalSection(&m_csLock);
 
 	// here we must check if response body processing is enabled
@@ -663,7 +677,23 @@ CMyHttpModule::OnSendResponse(
 
 Finished:
 
+	// TEMP-DEBUG (local CI only, not for upstream)
+	{
+		char dbgbuf[256];
+		sprintf_s(dbgbuf, sizeof(dbgbuf),
+			"DBG OnSendResponse Finished: output_filters=%p",
+			(void *)rsc->m_pRequestRec->output_filters);
+		WriteEventViewerLog(dbgbuf, EVENTLOG_INFORMATION_TYPE);
+	}
+
 	int status = modsecProcessResponse(rsc->m_pRequestRec);
+
+	// TEMP-DEBUG (local CI only, not for upstream)
+	{
+		char dbgbuf[128];
+		sprintf_s(dbgbuf, sizeof(dbgbuf), "DBG modsecProcessResponse returned %d", status);
+		WriteEventViewerLog(dbgbuf, EVENTLOG_INFORMATION_TYPE);
+	}
 
 	// the logic here is temporary, needs clarification
 	//

@@ -367,6 +367,12 @@ jobs:
             Write-Host "modsec_debug.log not found"
         }
 
+        # Dump TEMP-DEBUG instrumentation events from OnSendResponse
+        Write-Host "--- DBG events from OnSendResponse ---"
+        Get-EventLog -LogName Application -Source ModSecurity -Newest 200 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'DBG ' } |
+            ForEach-Object { $_.Message }
+
         if ($redirectFailed) {
             exit 1
         }
