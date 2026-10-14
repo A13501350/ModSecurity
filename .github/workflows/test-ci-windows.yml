@@ -251,7 +251,8 @@ jobs:
             'SecRule ARGS:redir_arg "@streq foo" "id:99999,phase:2,pass,redirect:/"',
             'SecRule REQUEST_URI "@streq /iisstart.htm" "id:99998,phase:4,pass,redirect:/"',
             'SecRule ARGS:probe3 "@streq 1" "id:99997,phase:3,deny,status:403"',
-            'SecRule ARGS:probe4 "@streq 1" "id:99996,phase:4,deny,status:403"'
+            'SecRule ARGS:probe4 "@streq 1" "id:99996,phase:4,deny,status:403"',
+            'SecRule REQUEST_URI "@streq /iisstart.htm" "id:99994,phase:4,deny,status:405"'
           )
           Add-Content -Path $modSecurityConfigFile -Value $redirectTestRules
 
@@ -360,8 +361,8 @@ jobs:
         $debugLog = "C:\Windows\Temp\modsec_debug.log"
         if (Test-Path $debugLog) {
             Write-Host "--- modsec_debug.log (filtered excerpts) ---"
-            Select-String -Path $debugLog -Pattern '9999[6-9]|Starting phase|Output filter|redirection|Access denied|resbody' |
-                Select-Object -Last 150 | ForEach-Object { $_.Line }
+            Select-String -Path $debugLog -Pattern '9999[4-9]|Matched|Internal Error|Starting phase|Access denied|Output filter|redirection|Target value' |
+                Select-Object -Last 250 | ForEach-Object { $_.Line }
         }
         else {
             Write-Host "modsec_debug.log not found"

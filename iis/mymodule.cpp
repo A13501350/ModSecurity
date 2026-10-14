@@ -434,9 +434,10 @@ CMyHttpModule::OnSendResponse(
 		char dbgbuf[512];
 		HTTP_RESPONSE *pDbgRaw = pHttpContext->GetResponse() ? pHttpContext->GetResponse()->GetRawHttpResponse() : NULL;
 		sprintf_s(dbgbuf, sizeof(dbgbuf),
-			"DBG OnSendResponse entry: rsc=%p rec=%p buf=%p resbody_access=%d chunks=%d flags=0x%x",
+			"DBG OnSendResponse entry: rsc=%p rec=%p uri=%s buf=%p resbody_access=%d chunks=%d flags=0x%x",
 			(void *)rsc,
 			rsc ? (void *)rsc->m_pRequestRec : NULL,
+			(rsc && rsc->m_pRequestRec && rsc->m_pRequestRec->uri) ? rsc->m_pRequestRec->uri : "(null)",
 			rsc ? (void *)rsc->m_pResponseBuffer : NULL,
 			(rsc && rsc->m_pRequestRec) ? modsecIsResponseBodyAccessEnabled(rsc->m_pRequestRec) : -1,
 			pDbgRaw ? (int)pDbgRaw->EntityChunkCount : -1,
@@ -707,10 +708,12 @@ Finished:
 
 	// TEMP-DEBUG (local CI only, not for upstream)
 	{
-		char dbgbuf[256];
+		char dbgbuf[384];
 		sprintf_s(dbgbuf, sizeof(dbgbuf),
-			"DBG OnSendResponse Finished: output_filters=%p",
-			(void *)rsc->m_pRequestRec->output_filters);
+			"DBG OnSendResponse Finished: uri=%s output_filters=%p ctype=%s",
+			rsc->m_pRequestRec->uri ? rsc->m_pRequestRec->uri : "(null)",
+			(void *)rsc->m_pRequestRec->output_filters,
+			rsc->m_pRequestRec->content_type ? rsc->m_pRequestRec->content_type : "(null)");
 		WriteEventViewerLog(dbgbuf, EVENTLOG_INFORMATION_TYPE);
 	}
 
@@ -750,13 +753,14 @@ Finished:
 		return RQ_NOTIFICATION_FINISH_REQUEST;
 	}
 Exit:
-	// temporary hack, in reality OnSendRequest theoretically could possibly come before OnEndRequest
+	// The request_rec is intentionally NOT finished here: IIS may fire
+	// SEND_RESPONSE multiple times and the logging phase still needs the
+	// request_rec. Release happens in OnPostEndRequest instead, which runs
+	// after the response has been fully sent (the FinishRequest above in
+	// the intervention path stays, since the request ends right there).
 	//
-	if(rsc != NULL)
-		rsc->FinishRequest();
-
 	LeaveCriticalSection(&m_csLock);
-		
+
 	return RQ_NOTIFICATION_CONTINUE;
 }
 
@@ -770,9 +774,12 @@ CMyHttpModule::OnPostEndRequest(
 
 	rsc = (REQUEST_STORED_CONTEXT *)pHttpContext->GetModuleContextContainer()->GetModuleContext(g_pModuleContext);
 
-	// only finish request if OnSendResponse have been called already
+	// finish the request (which also runs the logging phase) for any
+	// request_rec still alive, covering both the buffered path (where
+	// OnSendResponse processed the response body) and the headers-only
+	// path
 	//
-	if(rsc != NULL && rsc->m_pResponseBuffer != NULL)
+	if(rsc != NULL && rsc->m_pRequestRec != NULL)
 	{
 		EnterCriticalSection(&m_csLock);
 
