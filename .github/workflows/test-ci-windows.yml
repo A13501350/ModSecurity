@@ -251,7 +251,8 @@ jobs:
         }
 
     # Unknown-verb (e.g. PATCH) regression: enable the audit log file and mark the
-    # dedicated path for auditing so the transaction is always logged.
+    # dedicated path for auditing so the transaction is always logged. SecAuditLog
+    # is opened at config parse time by the app pool identity, so grant write access.
     - name: Enable audit log and add unknown HTTP verb marker rule
       shell: pwsh
       run: |
@@ -261,6 +262,8 @@ jobs:
         SecRule REQUEST_URI "@streq /modsectest/patch" "id:1000001,phase:1,pass,nolog,auditlog"
         '@
         Add-Content -Path $configFile -Value $rules
+
+        icacls "C:\inetpub\temp" /grant "IIS_IUSRS:(OI)(CI)M" "IIS AppPool\DefaultAppPool:(OI)(CI)M"
 
     - name: Test IIS Module
       shell: pwsh
@@ -313,11 +316,9 @@ jobs:
         $auditLog = "c:\inetpub\temp\modsec_audit.log"
         $expected = "PATCH /modsectest/patch HTTP/1.1"
         $found = $false
-        $logExists = $false
         for ($i = 0; $i -lt 10 -and -not $found; $i++) {
             try {
                 if (Test-Path $auditLog) {
-                    $logExists = $true
                     if ((Get-Content $auditLog -Raw) -match [regex]::Escape($expected)) {
                         $found = $true
                     }
@@ -327,17 +328,25 @@ jobs:
             if (-not $found) { Start-Sleep -Seconds 1 }
         }
 
+        # Diagnostics first (note: Write-Error aborts immediately because GitHub Actions
+        # sets ErrorActionPreference=Stop, so everything must be printed before it).
+        Write-Host "=== ModSecurity event log (Application, newest 20) ==="
+        Get-EventLog -LogName Application -Source ModSecurity -Newest 20 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host ("[{0}] {1}: {2}" -f $_.TimeGenerated, $_.EntryType, $_.Message) }
+
+        if (Test-Path $auditLog) {
+            Write-Host "=== audit log content ($auditLog) ==="
+            Get-Content $auditLog | ForEach-Object { Write-Host $_ }
+        }
+        else {
+            Write-Host "=== audit log was not created at $auditLog ==="
+        }
+
         if ($found) {
             Write-Host "PASS: audit log records the raw verb ($expected)"
         }
         else {
-            Write-Error "FAIL: audit log does not contain '$expected'"
-            if ($logExists) {
-                Get-Content $auditLog -Tail 40 | ForEach-Object { Write-Host $_ }
-            }
-            else {
-                Write-Host "Audit log file was not created at $auditLog"
-            }
+            Write-Host "::error::FAIL: audit log does not contain '$expected'"
             exit 1
         }
         
