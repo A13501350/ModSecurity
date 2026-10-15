@@ -318,10 +318,42 @@ jobs:
         $ErrorActionPreference = 'Continue'
         Write-Host '>>> 3397-REPRO BEGIN'
 
-        # Mirror the out-of-the-box #3397 config: engine On, request body access + stream inspection on.
+        # Mirror #3397 out-of-the-box config, and additionally enable ModSecurity
+        # debug + audit logging so a fault leaves a trace of how far the module got
+        # while reading the request body.
+        $mstemp = 'c:\inetpub\temp'
+        New-Item -ItemType Directory -Force -Path $mstemp | Out-Null
+        New-Item -ItemType Directory -Force -Path 'c:\inetpub\logs' | Out-Null
+        $dbgLog = Join-Path $mstemp 'msc_debug.log'
+        $auditLog = Join-Path $mstemp 'msc_audit.log'
+
+        # The w3wp worker runs as the application pool identity and MUST be able to write
+        # these paths, otherwise ModSecurity fails to open the logs at config load (cf. #812).
+        $appcmdPre = Join-Path $env:SystemRoot 'system32\inetsrv\appcmd.exe'
+        $pool = (& $appcmdPre list apppool /text:name 2>$null | Select-Object -First 1)
+        if (-not $pool) { $pool = 'DefaultAppPool' }
+        Write-Host ("app pool identity: IIS APPPOOL\{0}" -f $pool)
+        $principals = @("IIS APPPOOL\$pool", 'IIS_IUSRS', 'NETWORK SERVICE')
+        foreach ($d in @($mstemp, 'c:\inetpub\logs')) {
+          foreach ($p in $principals) { & icacls $d /grant ("{0}:(OI)(CI)M" -f $p) /t /c 2>&1 | Out-Null }
+        }
+        foreach ($f in @($dbgLog, $auditLog)) {
+          if (-not (Test-Path $f)) { New-Item -ItemType File -Force -Path $f | Out-Null }
+          foreach ($p in $principals) { & icacls $f /grant ("{0}:M" -f $p) /c 2>&1 | Out-Null }
+        }
+
         $conf = 'C:\Program Files\ModSecurity IIS\modsecurity.conf'
         if (Test-Path $conf) {
-          (Get-Content $conf) -replace 'SecRuleEngine DetectionOnly','SecRuleEngine On' | Set-Content $conf
+          $c = Get-Content $conf
+          $c = $c -replace 'SecRuleEngine DetectionOnly','SecRuleEngine On'
+          $c = $c -replace '#?\s*SecDebugLog\s+.*',("SecDebugLog {0}" -f $dbgLog)
+          $c = $c -replace '#?\s*SecDebugLogLevel\s+.*','SecDebugLogLevel 5'
+          $c = $c -replace 'SecAuditEngine RelevantOnly','SecAuditEngine On'
+          $c = $c -replace '#?\s*SecAuditLog\s+.*',("SecAuditLog {0}" -f $auditLog)
+          $c = $c -replace 'SecAuditLogParts\s+.*','SecAuditLogParts ABCDEFGHIJKZ'
+          Set-Content $conf $c
+          Write-Host ("debug log -> {0}" -f $dbgLog)
+          Write-Host ("audit log -> {0}" -f $auditLog)
         }
 
         # Enable WER local dumps for w3wp so a real fault leaves a .dmp we can count.
@@ -346,6 +378,15 @@ jobs:
         while ($ms.Length -lt $sz) { $ms.Write($chunk, 0, $chunk.Length) }
         [System.IO.File]::WriteAllBytes($big, $ms.ToArray()[0..($sz-1)])
         Write-Host ("upload files: small={0}B big={1}B" -f (Get-Item $small).Length, (Get-Item $big).Length)
+
+        # Best-effort IIS Failed Request Tracing (FREB) so the pipeline records where the
+        # 500 originates. Enabling it recycles the pool, so do it BEFORE the baseline warm-up.
+        $appcmd = Join-Path $env:SystemRoot 'system32\inetsrv\appcmd.exe'
+        $site = (& $appcmd list site /text:name 2>$null | Select-Object -First 1)
+        if (-not $site) { $site = 'Default Web Site' }
+        Write-Host ("Enabling FREB on site: {0}" -f $site)
+        & $appcmd configure trace $site /enablesite 2>&1 | Out-Null
+        & $appcmd configure trace $site /enable /path:* /iisWarnings:true /iisErrors:true /aspErrors:true /security:true /refresh:true 2>&1 | Out-Null
 
         # Warm up so a worker exists BEFORE the measurement (no service restart inside the window,
         # otherwise PID churn is just the recycle and proves nothing).
@@ -401,6 +442,26 @@ jobs:
           Write-Host '>>> 3397-REPRO RESULT: worker recycled (possible fault, no dump/event yet)'
         } else {
           Write-Host '>>> 3397-REPRO RESULT: no fault signal observed'
+        }
+
+        # --- Logging artifacts: how far did ModSecurity get reading the body? ---
+        Write-Host '>>> 3397-DEBUGLOG tail:'
+        if (Test-Path $dbgLog) { Get-Content $dbgLog -Tail 50 -ErrorAction SilentlyContinue } else { Write-Host '(no debug log produced)' }
+
+        Write-Host (">>> 3397-AUDITLOG present: {0}" -f (Test-Path $auditLog))
+        if ((Test-Path $auditLog) -and ((Get-Item $auditLog).Length -gt 0)) {
+          Write-Host (">>> 3397-AUDITLOG size: {0} bytes" -f (Get-Item $auditLog).Length)
+          $auditHits = Select-String -Path $auditLog -Pattern 'ModSecurity|Action|intercepted|discarded|Request Body|Status:' -ErrorAction SilentlyContinue | Select-Object -First 15
+          $auditHits | ForEach-Object { Write-Host ("  AUDIT: {0}" -f $_.Line.Trim()) }
+        }
+
+        Write-Host '>>> 3397-FREB files:'
+        $frb = Get-ChildItem -Path 'C:\inetpub\logs\FailedReqLogFiles' -Recurse -Filter '*.xml' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 3
+        if (-not $frb) { Write-Host '(no FREB xml captured)' }
+        foreach ($x in $frb) {
+          Write-Host ("FREB: {0}" -f $x.FullName)
+          Select-String -Path $x.FullName -Pattern 'StatusCode="500"|subStatusCode|ModSecurity|mod_security|ModuleName|Module="|handlerName|System.Web' -ErrorAction SilentlyContinue |
+            Select-Object -First 10 | ForEach-Object { Write-Host ("   {0}" -f $_.Line.Trim()) }
         }
 
         # Show the last response body snippet (what the 500 actually says).
