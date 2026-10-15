@@ -250,16 +250,17 @@ jobs:
             exit 1
         }
 
-    # Unknown-verb (e.g. PATCH) regression rule; dedicated path so it does not affect the CRS tests.
-    - name: Add unknown HTTP verb regression rule
+    # Unknown-verb (e.g. PATCH) regression: enable the audit log file and mark the
+    # dedicated path for auditing so the transaction is always logged.
+    - name: Enable audit log and add unknown HTTP verb marker rule
       shell: pwsh
       run: |
         $configFile = "C:\Program Files\ModSecurity IIS\modsecurity.conf"
-        $rule = @'
-        SecRule REQUEST_URI "@streq /modsectest/patch" "id:1000001,phase:1,deny,status:418,chain,log,msg:'IIS unknown HTTP verb regression test'"
-            SecRule REQUEST_METHOD "@streq PATCH"
+        $rules = @'
+        SecAuditLog c:\inetpub\temp\modsec_audit.log
+        SecRule REQUEST_URI "@streq /modsectest/patch" "id:1000001,phase:1,pass,nolog,auditlog"
         '@
-        Add-Content -Path $configFile -Value $rule
+        Add-Content -Path $configFile -Value $rules
 
     - name: Test IIS Module
       shell: pwsh
@@ -303,14 +304,40 @@ jobs:
             }
         }
 
-        # Without the fix REQUEST_METHOD is "INVALID", so rule 1000001 never matches and this cannot return 418.
-        $patchUrl = "http://localhost/modsectest/patch"
-        $patchResponse = Invoke-WebRequest $patchUrl -Method PATCH -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
-        if ($patchResponse.StatusCode -eq 418) {
-            Write-Host "PASS: PATCH method is reported as PATCH (not INVALID)"
+        # Without the fix the connector reports the unknown verb as "INVALID", so the
+        # audit log request line reads "INVALID /modsectest/patch HTTP/1.1". CRS blocks
+        # PATCH with 403 either way; the response code is irrelevant here.
+        $patchResponse = Invoke-WebRequest "http://localhost/modsectest/patch" -Method PATCH -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
+        Write-Host "PATCH request completed with status $($patchResponse.StatusCode)"
+
+        $auditLog = "c:\inetpub\temp\modsec_audit.log"
+        $expected = "PATCH /modsectest/patch HTTP/1.1"
+        $found = $false
+        $logExists = $false
+        for ($i = 0; $i -lt 10 -and -not $found; $i++) {
+            try {
+                if (Test-Path $auditLog) {
+                    $logExists = $true
+                    if ((Get-Content $auditLog -Raw) -match [regex]::Escape($expected)) {
+                        $found = $true
+                    }
+                }
+            }
+            catch { }
+            if (-not $found) { Start-Sleep -Seconds 1 }
+        }
+
+        if ($found) {
+            Write-Host "PASS: audit log records the raw verb ($expected)"
         }
         else {
-            Write-Error "FAIL: PATCH method - expected 418 but got $($patchResponse.StatusCode)"
+            Write-Error "FAIL: audit log does not contain '$expected'"
+            if ($logExists) {
+                Get-Content $auditLog -Tail 40 | ForEach-Object { Write-Host $_ }
+            }
+            else {
+                Write-Host "Audit log file was not created at $auditLog"
+            }
             exit 1
         }
         
