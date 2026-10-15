@@ -395,9 +395,29 @@ jobs:
         function Get-W3wp { @(Get-Process w3wp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id) }
         $start = (Get-Date)
 
+        # The default site is static-only: a POST to a missing path 404s and IIS never hands
+        # the entity to the module, so the request-body read path (the crash locus) is not
+        # exercised. Stand up a body-consuming ASP.NET endpoint (analog of WordPress
+        # admin-ajax.php) so ModSecurity actually reads the large multipart body.
+        & $appcmd set apppool 'DefaultAppPool' /managedRuntimeVersion:v4.0 /managedPipelineMode:Integrated 2>&1 | Out-Null
+        $aspx = 'C:\inetpub\wwwroot\up.aspx'
+        Set-Content -Path $aspx -Encoding ASCII -Value @'
+<%@ Page Language="C#" %>
+<script runat="server">
+protected void Page_Load(object s, System.EventArgs e){
+  byte[] b = Request.BinaryRead(Request.TotalBytes);
+  Response.ContentType = "text/plain";
+  Response.Write("OK " + b.Length);
+}
+</script>
+'@
+        $url = 'http://localhost/up.aspx'
+        # Confirm the endpoint works (200) before measuring; otherwise ASP.NET is not registered.
+        & curl.exe -s -o NUL -w ('aspx probe GET -> HTTP %{http_code}' + "`n") --max-time 30 $url
+
         # Control: small multipart POST.
         $resp = Join-Path $env:RUNNER_TEMP 'resp.txt'
-        $cSmall = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$small" --max-time 60 'http://localhost/upload-test'
+        $cSmall = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$small" --max-time 60 $url
         Write-Host ("CONTROL small POST -> HTTP {0}" -f $cSmall)
 
         # Test: repeated large multipart POSTs, checking for a fault after each.
@@ -405,7 +425,7 @@ jobs:
         Write-Host ("w3wp PIDs baseline: {0}" -f ($baseline -join ','))
         $pidsNow = $baseline
         for ($i = 0; $i -lt 6; $i++) {
-          $code = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$big" --max-time 60 'http://localhost/upload-test'
+          $code = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$big" --max-time 60 $url
           $dNow = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
           $pidsNow = Get-W3wp
           Write-Host ("POST #{0} -> HTTP {1} | w3wp=[{2}] | dumps={3}" -f ($i+1), $code, ($pidsNow -join ','), $dNow)
