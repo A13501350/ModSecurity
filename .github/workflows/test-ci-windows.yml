@@ -250,10 +250,7 @@ jobs:
             exit 1
         }
 
-    # IIS reports unrecognized verbs (e.g. PATCH) as HttpVerbUnknown. The connector
-    # must expose the raw verb as REQUEST_METHOD instead of "INVALID". The rule is
-    # scoped to a dedicated path so it does not interfere with the CRS test suite.
-    # modsecurity.conf is included before the CRS rules, so it is evaluated first.
+    # Unknown-verb (e.g. PATCH) regression rule; dedicated path so it does not affect the CRS tests.
     - name: Add unknown HTTP verb regression rule
       shell: pwsh
       run: |
@@ -306,10 +303,7 @@ jobs:
             }
         }
 
-        # Regression test for the unknown-verb fix. Rule 1000001 only matches when
-        # REQUEST_METHOD is really "PATCH"; without the fix it is "INVALID", the rule
-        # does not match and this request can never return 418. Unlike the cases
-        # above, a mismatch fails the job.
+        # Without the fix REQUEST_METHOD is "INVALID", so rule 1000001 never matches and this cannot return 418.
         $patchUrl = "http://localhost/modsectest/patch"
         $patchResponse = Invoke-WebRequest $patchUrl -Method PATCH -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
         if ($patchResponse.StatusCode -eq 418) {
