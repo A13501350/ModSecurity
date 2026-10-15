@@ -401,16 +401,8 @@ jobs:
         # admin-ajax.php) so ModSecurity actually reads the large multipart body.
         & $appcmd set apppool 'DefaultAppPool' /managedRuntimeVersion:v4.0 /managedPipelineMode:Integrated 2>&1 | Out-Null
         $aspx = 'C:\inetpub\wwwroot\up.aspx'
-        Set-Content -Path $aspx -Encoding ASCII -Value @'
-<%@ Page Language="C#" %>
-<script runat="server">
-protected void Page_Load(object s, System.EventArgs e){
-  byte[] b = Request.BinaryRead(Request.TotalBytes);
-  Response.ContentType = "text/plain";
-  Response.Write("OK " + b.Length);
-}
-</script>
-'@
+        $aspxB64 = 'PCVAIFBhZ2UgTGFuZ3VhZ2U9IkMjIiAlPgo8c2NyaXB0IHJ1bmF0PSJzZXJ2ZXIiPgpwcm90ZWN0ZWQgdm9pZCBQYWdlX0xvYWQob2JqZWN0IHMsIFN5c3RlbS5FdmVudEFyZ3MgZSl7CiAgYnl0ZVtdIGIgPSBSZXF1ZXN0LkJpbmFyeVJlYWQoUmVxdWVzdC5Ub3RhbEJ5dGVzKTsKICBSZXNwb25zZS5Db250ZW50VHlwZSA9ICJ0ZXh0L3BsYWluIjsKICBSZXNwb25zZS5Xcml0ZSgiT0sgIiArIGIuTGVuZ3RoKTsKfQo8L3NjcmlwdD4K'
+        [System.IO.File]::WriteAllBytes($aspx, [System.Convert]::FromBase64String($aspxB64))
         $url = 'http://localhost/up.aspx'
         # Confirm the endpoint works (200) before measuring; otherwise ASP.NET is not registered.
         & curl.exe -s -o NUL -w ('aspx probe GET -> HTTP %{http_code}' + "`n") --max-time 30 $url
