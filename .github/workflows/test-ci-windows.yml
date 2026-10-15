@@ -318,59 +318,96 @@ jobs:
         $ErrorActionPreference = 'Continue'
         Write-Host '>>> 3397-REPRO BEGIN'
 
-        # Mirror the out-of-the-box #3397 config: request body access + stream inspection on.
+        # Mirror the out-of-the-box #3397 config: engine On, request body access + stream inspection on.
         $conf = 'C:\Program Files\ModSecurity IIS\modsecurity.conf'
         if (Test-Path $conf) {
           (Get-Content $conf) -replace 'SecRuleEngine DetectionOnly','SecRuleEngine On' | Set-Content $conf
         }
 
-        # Build a ~5MB upload file (larger than SecRequestBodyInMemoryLimit 128KB,
-        # smaller than SecRequestBodyLimit 13107200) so the body spills to disk.
-        $reproDir = Join-Path $env:RUNNER_TEMP 'mscrepro3397'
-        New-Item -ItemType Directory -Force -Path $reproDir | Out-Null
-        $big = Join-Path $reproDir 'big.bin'
+        # Enable WER local dumps for w3wp so a real fault leaves a .dmp we can count.
+        $dumpDir = Join-Path $env:RUNNER_TEMP 'w3wp-dumps'
+        New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+        $ld = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\w3wp.exe'
+        New-Item -Force -Path $ld | Out-Null
+        New-ItemProperty -Force -Path $ld -Name DumpFolder -Value $dumpDir -PropertyType ExpandString | Out-Null
+        New-ItemProperty -Force -Path $ld -Name DumpType -Value 1 -PropertyType DWord | Out-Null
+        $dumpsBefore = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
+
+        # Build upload files: 1KB control + 5MB target (above SecRequestBodyInMemoryLimit 128KB,
+        # below SecRequestBodyLimit 13107200 so it is accepted and buffered, not rejected).
+        $dir = Join-Path $env:RUNNER_TEMP 'mscrepro3397'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $small = Join-Path $dir 'small.bin'
+        [System.IO.File]::WriteAllBytes($small, [byte[]]((48..57) * 100))
+        $big = Join-Path $dir 'big.bin'
         $sz = 5MB
-        $chunk = [byte[]]((0..255))
+        $chunk = [byte[]](0..255)
         $ms = New-Object System.IO.MemoryStream
         while ($ms.Length -lt $sz) { $ms.Write($chunk, 0, $chunk.Length) }
         [System.IO.File]::WriteAllBytes($big, $ms.ToArray()[0..($sz-1)])
-        Write-Host ("Created upload file: {0} bytes" -f (Get-Item $big).Length)
+        Write-Host ("upload files: small={0}B big={1}B" -f (Get-Item $small).Length, (Get-Item $big).Length)
 
-        # Note worker process ids before the requests.
-        function Get-W3wpPids { (Get-Process w3wp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id) -join ',' }
-        $pidsBefore = Get-W3wpPids
-        Write-Host ("w3wp PIDs before: {0}" -f $pidsBefore)
-
+        # Warm up so a worker exists BEFORE the measurement (no service restart inside the window,
+        # otherwise PID churn is just the recycle and proves nothing).
+        & curl.exe -s -o NUL -w 'warmup -> HTTP %{http_code}\n' 'http://localhost/'
+        Start-Sleep -Seconds 2
+        function Get-W3wp { @(Get-Process w3wp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id) }
         $start = (Get-Date)
-        Restart-Service W3SVC -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
 
-        # Fire several large multipart POSTs to give the crash a chance to trigger.
-        for ($i = 0; $i -lt 5; $i++) {
-          $code = & curl.exe -s -o NUL -w '%{http_code}' -F "file=@$big" --max-time 60 'http://localhost/upload-test'
-          Write-Host ("POST #{0} -> HTTP {1}" -f ($i+1), $code)
+        # Control: small multipart POST.
+        $resp = Join-Path $env:RUNNER_TEMP 'resp.txt'
+        $cSmall = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$small" --max-time 60 'http://localhost/upload-test'
+        Write-Host ("CONTROL small POST -> HTTP {0}" -f $cSmall)
+
+        # Test: repeated large multipart POSTs, checking for a fault after each.
+        $baseline = Get-W3wp
+        Write-Host ("w3wp PIDs baseline: {0}" -f ($baseline -join ','))
+        $pidsNow = $baseline
+        for ($i = 0; $i -lt 6; $i++) {
+          $code = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$big" --max-time 60 'http://localhost/upload-test'
+          $dNow = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
+          $pidsNow = Get-W3wp
+          Write-Host ("POST #{0} -> HTTP {1} | w3wp=[{2}] | dumps={3}" -f ($i+1), $code, ($pidsNow -join ','), $dNow)
           Start-Sleep -Milliseconds 500
         }
 
-        Start-Sleep -Seconds 3
-        $pidsAfter = Get-W3wpPids
-        Write-Host ("w3wp PIDs after: {0}" -f $pidsAfter)
-        if ($pidsBefore -ne $pidsAfter) { Write-Host '>>> 3397-SIGNAL: w3wp process(es) changed (crash/recycle suspected)' }
+        # Verdict: a crash is indicated by (a) new w3wp .dmp, (b) worker PID set change with no restart,
+        # (c) an Application Error / WER event naming w3wp.
+        $dumpsAfter = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue)
+        $newDumps = $dumpsAfter.Count - $dumpsBefore
+        Write-Host ("new w3wp dumps: {0}" -f $newDumps)
+        if ($newDumps -gt 0) { $dumpsAfter | ForEach-Object { Write-Host ("DUMP: {0}" -f $_.FullName) } }
+        $pidChanged = (($baseline | Sort-Object) -join ',') -ne (($pidsNow | Sort-Object) -join ',')
+        if ($pidChanged) { Write-Host '>>> 3397-SIGNAL: w3wp PID changed with no service restart' }
 
-        # Scan the Application log written during this step for the #3397 signature.
-        $win = Get-WinEvent -FilterHashtable @{ LogName='Application'; StartTime=$start } -ErrorAction SilentlyContinue
-        $crashes = $win | Where-Object { $_.Message -match 'w3wp' }
-        if ($crashes) {
-          Write-Host '>>> 3397-CANDIDATE: w3wp-related Application log entries during repro:'
-          $crashes | Select-Object TimeCreated, ProviderName, Id -First 20 | Format-Table -AutoSize
-          $crashes | ForEach-Object { Write-Host '---'; Write-Host $_.Message }
+        # Targeted event-log scan.
+        $ae = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='Application Error'; StartTime=$start } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'w3wp' }
+        $wer = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='Windows Error Reporting'; StartTime=$start } -ErrorAction SilentlyContinue |
+               Where-Object { $_.Message -match 'w3wp' }
+        foreach ($e in @($ae) + @($wer)) {
+          if ($e) {
+            Write-Host '---EVENT---'
+            Write-Host $e.Message
+            if ($e.Message -match '(?i)exception code:\s*([0-9a-fx]+)') { Write-Host (">>> 3397-EXC: {0}" -f $matches[1]) }
+            if ($e.Message -match '(?i)faulting module:\s*(\S+)')        { Write-Host (">>> 3397-MOD: {0}" -f $matches[1]) }
+          }
+        }
+        if (-not $ae -and -not $wer) { Write-Host '>>> 3397-CANDIDATE: no w3wp Application Error / WER events' }
+
+        if ($newDumps -gt 0 -or $ae -or ($wer -and $pidChanged)) {
+          Write-Host '>>> 3397-REPRO RESULT: w3wp fault CONFIRMED on large upload'
+        } elseif ($pidChanged) {
+          Write-Host '>>> 3397-REPRO RESULT: worker recycled (possible fault, no dump/event yet)'
         } else {
-          Write-Host '>>> 3397-CANDIDATE: no w3wp Application log entries captured'
+          Write-Host '>>> 3397-REPRO RESULT: no fault signal observed'
         }
 
-        $fatal = $crashes | Where-Object { $_.Message -match 'c0000409|ucrtbase|ModSecurity|stack buffer overrun' }
-        if ($fatal) { Write-Host '>>> 3397-REPRO RESULT: CRASH SIGNATURE DETECTED' }
-        else        { Write-Host '>>> 3397-REPRO RESULT: no c0000409/ucrtbase signature seen' }
+        # Show the last response body snippet (what the 500 actually says).
+        if (Test-Path $resp) {
+          $body = (Get-Content $resp -Raw -ErrorAction SilentlyContinue)
+          if ($body) { Write-Host '>>> 3397-BODY:'; Write-Host ($body.Substring(0, [Math]::Min(600, $body.Length))) }
+        }
 
         Write-Host '>>> 3397-REPRO END'
 
