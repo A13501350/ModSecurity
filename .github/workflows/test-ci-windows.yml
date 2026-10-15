@@ -157,7 +157,11 @@ jobs:
 
   test:
     needs: package
-    runs-on: windows-latest
+    # Reporter's crash is on Windows Server 2025 (build 26100) with its newer ucrtbase.
+    # windows-latest is Server 2022, so run the repro on Server 2025 to match the faulting
+    # runtime. The MSI is OS-portable; only the worker's host OS/ucrtbase matters for a
+    # c0000409. Revert to windows-latest if this label is not available to the account.
+    runs-on: windows-2025
     strategy:
       matrix:
         config: [Release, RelWithDebInfo]
