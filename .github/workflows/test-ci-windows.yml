@@ -256,8 +256,8 @@ jobs:
       run: |
         $configFile = "C:\Program Files\ModSecurity IIS\modsecurity.conf"
         $rule = @'
-        SecRule REQUEST_URI "@streq /modsectest/patch" "id:1000001,phase:1,chain,log,msg:'IIS unknown HTTP verb regression test'"
-            SecRule REQUEST_METHOD "@streq PATCH" "deny,status:418"
+        SecRule REQUEST_URI "@streq /modsectest/patch" "id:1000001,phase:1,deny,status:418,chain,log,msg:'IIS unknown HTTP verb regression test'"
+            SecRule REQUEST_METHOD "@streq PATCH"
         '@
         Add-Content -Path $configFile -Value $rule
 
