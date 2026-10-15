@@ -429,9 +429,20 @@ jobs:
         $aspx = 'C:\inetpub\wwwroot\up.aspx'
         $aspxB64 = 'PCVAIFBhZ2UgTGFuZ3VhZ2U9IkMjIiAlPgo8c2NyaXB0IHJ1bmF0PSJzZXJ2ZXIiPgpwcm90ZWN0ZWQgdm9pZCBQYWdlX0xvYWQob2JqZWN0IHMsIFN5c3RlbS5FdmVudEFyZ3MgZSl7CiAgYnl0ZVtdIGIgPSBSZXF1ZXN0LkJpbmFyeVJlYWQoUmVxdWVzdC5Ub3RhbEJ5dGVzKTsKICBSZXNwb25zZS5Db250ZW50VHlwZSA9ICJ0ZXh0L3BsYWluIjsKICBSZXNwb25zZS5Xcml0ZSgiT0sgIiArIGIuTGVuZ3RoKTsKfQo8L3NjcmlwdD4K'
         [System.IO.File]::WriteAllBytes($aspx, [System.Convert]::FromBase64String($aspxB64))
+        # Raise ASP.NET's own request-size limits (default maxRequestLength is 4MB) so the
+        # sink accepts the whole 2-14MB sweep with a clean 200. Without this, ASP.NET 500s
+        # large bodies and we cannot tell a backend limit from a real w3wp fault.
+        $webcfg = 'C:\inetpub\wwwroot\web.config'
+        $webcfgB64 = 'PD94bWwgdmVyc2lvbj0iMS4wIj8+Cjxjb25maWd1cmF0aW9uPgogIDxzeXN0ZW0ud2ViPgogICAgPGh0dHBSdW50aW1lIG1heFJlcXVlc3RMZW5ndGg9IjIwOTcxNTEiIGV4ZWN1dGlvblRpbWVvdXQ9IjYwMCIvPgogIDwvc3lzdGVtLndlYj4KICA8c3lzdGVtLndlYlNlcnZlcj4KICAgIDxzZWN1cml0eT4KICAgICAgPHJlcXVlc3RGaWx0ZXJpbmc+CiAgICAgICAgPHJlcXVlc3RMaW1pdHMgbWF4QWxsb3dlZENvbnRlbnRMZW5ndGg9IjIxNDc0ODM2NDciLz4KICAgICAgPC9yZXF1ZXN0RmlsdGVyaW5nPgogICAgPC9zZWN1cml0eT4KICA8L3N5c3RlbS53ZWJTZXJ2ZXI+CjwvY29uZmlndXJhdGlvbj4K'
+        [System.IO.File]::WriteAllBytes($webcfg, [System.Convert]::FromBase64String($webcfgB64))
+        & $appcmd set config 'Default Web Site' /section:system.webServer/security/requestFiltering/requestLimits /maxAllowedContentLength:2147483647 /commit:apphost 2>&1 | Out-Null
         $url = 'http://localhost/up.aspx'
         # Confirm the endpoint works (200) before measuring; otherwise ASP.NET is not registered.
         & curl.exe -s -o NUL -w ('aspx probe GET -> HTTP %{http_code}' + "`n") --max-time 30 $url
+        # Pre-flight: a 6MB chunked POST must return 200. If it 500s, the backend (not
+        # ModSecurity) is still capping size and the sweep below is not trustworthy.
+        $pf = & curl.exe -s -o NUL -w '%{http_code}' -X POST -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary "@$($bigFiles[1])" --max-time 120 $url
+        Write-Host ("PREFLIGHT 6MB chunked POST -> HTTP {0} (want 200)" -f $pf)
 
         # Control: small multipart POST (should be 200 -> proves endpoint reads bodies).
         $resp = Join-Path $env:RUNNER_TEMP 'resp.txt'
