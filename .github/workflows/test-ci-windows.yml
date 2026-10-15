@@ -342,10 +342,13 @@ jobs:
           foreach ($p in $principals) { & icacls $f /grant ("{0}:M" -f $p) /c 2>&1 | Out-Null }
         }
 
+        # Reporter ran the OUT-OF-BOX config (SecRuleEngine DetectionOnly, NO ruleset).
+        # Match it: keep DetectionOnly, point debug+audit logs at the writable temp dir,
+        # and neutralize the CRS includes (installed earlier in this job) for the window.
         $conf = 'C:\Program Files\ModSecurity IIS\modsecurity.conf'
         if (Test-Path $conf) {
           $c = Get-Content $conf
-          $c = $c -replace 'SecRuleEngine DetectionOnly','SecRuleEngine On'
+          $c = $c -replace 'SecRuleEngine\s+On\b','SecRuleEngine DetectionOnly'
           $c = $c -replace '#?\s*SecDebugLog\s+.*',("SecDebugLog {0}" -f $dbgLog)
           $c = $c -replace '#?\s*SecDebugLogLevel\s+.*','SecDebugLogLevel 5'
           $c = $c -replace 'SecAuditEngine RelevantOnly','SecAuditEngine On'
@@ -354,6 +357,21 @@ jobs:
           Set-Content $conf $c
           Write-Host ("debug log -> {0}" -f $dbgLog)
           Write-Host ("audit log -> {0}" -f $auditLog)
+        }
+
+        # Disable the CRS includes so this behaves like the stock (ruleless) install.
+        $iisconf = 'C:\Program Files\ModSecurity IIS\modsecurity_iis.conf'
+        $iisBak = Join-Path $env:RUNNER_TEMP 'modsecurity_iis.conf.orig'
+        $crsDisabled = $false
+        if (Test-Path $iisconf) {
+          Copy-Item $iisconf $iisBak -Force
+          $ic = Get-Content $iisconf
+          if (($ic | Select-String -SimpleMatch 'coreruleset' -Quiet)) {
+            $ic = $ic -replace '^\s*Include\s+.*coreruleset.*', '# 3397repro: $0'
+            Set-Content $iisconf $ic
+            $crsDisabled = $true
+            Write-Host 'CRS includes disabled for repro window'
+          }
         }
 
         # Enable WER local dumps for w3wp so a real fault leaves a .dmp we can count.
@@ -365,19 +383,27 @@ jobs:
         New-ItemProperty -Force -Path $ld -Name DumpType -Value 1 -PropertyType DWord | Out-Null
         $dumpsBefore = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
 
-        # Build upload files: 1KB control + 5MB target (above SecRequestBodyInMemoryLimit 128KB,
-        # below SecRequestBodyLimit 13107200 so it is accepted and buffered, not rejected).
+        # Reporter crashed on a 4.5MB image AND a 12MB pdf (size-driven, content-agnostic),
+        # all under SecRequestBodyLimit 13107200 and over SecRequestBodyInMemoryLimit 131072.
+        # Build 2MB / 6MB / 12MB (just under limit) and 14MB (just over -> Reject path).
         $dir = Join-Path $env:RUNNER_TEMP 'mscrepro3397'
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $small = Join-Path $dir 'small.bin'
         [System.IO.File]::WriteAllBytes($small, [byte[]]((48..57) * 100))
-        $big = Join-Path $dir 'big.bin'
-        $sz = 5MB
         $chunk = [byte[]](0..255)
-        $ms = New-Object System.IO.MemoryStream
-        while ($ms.Length -lt $sz) { $ms.Write($chunk, 0, $chunk.Length) }
-        [System.IO.File]::WriteAllBytes($big, $ms.ToArray()[0..($sz-1)])
-        Write-Host ("upload files: small={0}B big={1}B" -f (Get-Item $small).Length, (Get-Item $big).Length)
+        $sizes = 2, 6, 12, 14
+        $bigFiles = @()
+        foreach ($s in $sizes) {
+          $f = Join-Path $dir ("big{0}.bin" -f $s)
+          $ms = New-Object System.IO.MemoryStream
+          $target = [long]$s * 1MB
+          while ($ms.Length -lt $target) { $ms.Write($chunk, 0, $chunk.Length) }
+          $bytes = $ms.ToArray()
+          if ($bytes.LongLength -gt $target) { $bytes = $bytes[0..($target-1)] }
+          [System.IO.File]::WriteAllBytes($f, $bytes)
+          Write-Host ("upload file: {0} = {1}B" -f (Split-Path $f -Leaf), (Get-Item $f).Length)
+          $bigFiles += $f
+        }
 
         # Best-effort IIS Failed Request Tracing (FREB) so the pipeline records where the
         # 500 originates. Enabling it recycles the pool, so do it BEFORE the baseline warm-up.
@@ -407,21 +433,36 @@ jobs:
         # Confirm the endpoint works (200) before measuring; otherwise ASP.NET is not registered.
         & curl.exe -s -o NUL -w ('aspx probe GET -> HTTP %{http_code}' + "`n") --max-time 30 $url
 
-        # Control: small multipart POST.
+        # Control: small multipart POST (should be 200 -> proves endpoint reads bodies).
         $resp = Join-Path $env:RUNNER_TEMP 'resp.txt'
-        $cSmall = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$small" --max-time 60 $url
+        $cSmall = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$small" --max-time 120 $url
         Write-Host ("CONTROL small POST -> HTTP {0}" -f $cSmall)
 
-        # Test: repeated large multipart POSTs, checking for a fault after each.
+        # Sweep every size, two ways:
+        #   (a) multipart with a known Content-Length,
+        #   (b) chunked / unknown-length -> the realloc-growth branch of the IIS-only
+        #       MSC_LARGE_STREAM_INPUT request-body streaming path (unreachable on Linux).
         $baseline = Get-W3wp
         Write-Host ("w3wp PIDs baseline: {0}" -f ($baseline -join ','))
         $pidsNow = $baseline
-        for ($i = 0; $i -lt 6; $i++) {
-          $code = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$big" --max-time 60 $url
-          $dNow = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
-          $pidsNow = Get-W3wp
-          Write-Host ("POST #{0} -> HTTP {1} | w3wp=[{2}] | dumps={3}" -f ($i+1), $code, ($pidsNow -join ','), $dNow)
-          Start-Sleep -Milliseconds 500
+        $crashSeen = $false
+        $n = 0
+        foreach ($f in $bigFiles) {
+          $leaf = Split-Path $f -Leaf
+          foreach ($mode in 'multipart','chunked') {
+            $n++
+            if ($mode -eq 'multipart') {
+              $code = & curl.exe -s -o $resp -w '%{http_code}' -F "file=@$f" --max-time 120 $url
+            } else {
+              $code = & curl.exe -s -o $resp -w '%{http_code}' -X POST -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary "@$f" --max-time 120 $url
+            }
+            $dNow = @(Get-ChildItem $dumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
+            $pidsNow = Get-W3wp
+            $pidChurn = (($baseline | Sort-Object) -join ',') -ne (($pidsNow | Sort-Object) -join ',')
+            Write-Host ("POST #{0} [{1} {2}] -> HTTP {3} | w3wp=[{4}] | dumps={5}" -f $n, $leaf, $mode, $code, ($pidsNow -join ','), $dNow)
+            if ($dNow -gt $dumpsBefore -or $pidChurn) { $crashSeen = $true }
+            Start-Sleep -Milliseconds 400
+          }
         }
 
         # Verdict: a crash is indicated by (a) new w3wp .dmp, (b) worker PID set change with no restart,
@@ -448,17 +489,22 @@ jobs:
         }
         if (-not $ae -and -not $wer) { Write-Host '>>> 3397-CANDIDATE: no w3wp Application Error / WER events' }
 
-        if ($newDumps -gt 0 -or $ae -or ($wer -and $pidChanged)) {
+        if ($newDumps -gt 0 -or $ae) {
           Write-Host '>>> 3397-REPRO RESULT: w3wp fault CONFIRMED on large upload'
-        } elseif ($pidChanged) {
-          Write-Host '>>> 3397-REPRO RESULT: worker recycled (possible fault, no dump/event yet)'
+        } elseif ($crashSeen -or $pidChanged -or ($wer -and $pidChanged)) {
+          Write-Host '>>> 3397-REPRO RESULT: worker recycled/churn during sweep (possible fault, no dump/event captured yet)'
         } else {
           Write-Host '>>> 3397-REPRO RESULT: no fault signal observed'
         }
 
         # --- Logging artifacts: how far did ModSecurity get reading the body? ---
-        Write-Host '>>> 3397-DEBUGLOG tail:'
-        if (Test-Path $dbgLog) { Get-Content $dbgLog -Tail 50 -ErrorAction SilentlyContinue } else { Write-Host '(no debug log produced)' }
+        Write-Host '>>> 3397-DEBUGLOG body markers:'
+        if (Test-Path $dbgLog) {
+          Select-String -Path $dbgLog -Pattern 'Request Body|Content-Length|Transfer-Encoding|Streaming|stream_input|multipart|Multipart|incomplete|Reading|Transfer' -ErrorAction SilentlyContinue |
+            Select-Object -Last 30 | ForEach-Object { Write-Host ("  DBG: {0}" -f $_.Line.Trim()) }
+          Write-Host '>>> 3397-DEBUGLOG tail:'
+          Get-Content $dbgLog -Tail 60 -ErrorAction SilentlyContinue
+        } else { Write-Host '(no debug log produced)' }
 
         Write-Host (">>> 3397-AUDITLOG present: {0}" -f (Test-Path $auditLog))
         if ((Test-Path $auditLog) -and ((Get-Item $auditLog).Length -gt 0)) {
@@ -480,6 +526,13 @@ jobs:
         if (Test-Path $resp) {
           $body = (Get-Content $resp -Raw -ErrorAction SilentlyContinue)
           if ($body) { Write-Host '>>> 3397-BODY:'; Write-Host ($body.Substring(0, [Math]::Min(600, $body.Length))) }
+        }
+
+        # Restore the CRS includes so the downstream go-ftw step still exercises CRS.
+        if ($crsDisabled -and (Test-Path $iisBak)) {
+          Copy-Item $iisBak $iisconf -Force
+          & $appcmd recycle apppool 'DefaultAppPool' 2>&1 | Out-Null
+          Write-Host 'CRS includes restored for downstream tests'
         }
 
         Write-Host '>>> 3397-REPRO END'
