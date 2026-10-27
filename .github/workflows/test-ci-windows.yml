@@ -308,6 +308,77 @@ jobs:
 
         Get-EventLog -LogName Application -Source ModSecurity | Format-List
 
+    - name: Test fail-closed on config load failure
+      shell: pwsh
+      run: |
+        $iisConfigDir = "C:\Program Files\ModSecurity IIS"
+        $modsecConf = Join-Path $iisConfigDir "modsecurity_iis.conf"
+        $backupConf = Join-Path $iisConfigDir "modsecurity_iis.conf.bak"
+
+        if (-not (Test-Path $modsecConf)) {
+          Write-Error "modsecurity_iis.conf not found at $modsecConf"
+          exit 1
+        }
+        Copy-Item $modsecConf $backupConf -Force
+
+        try {
+          # Inject a syntax error into the config file
+          $badConf = @(
+            '# Invalid config for fail-closed test',
+            'SecRuleEngine BOGUS_VALUE_HERE'
+          ) -join "`r`n"
+          Set-Content -Path $modsecConf -Value $badConf -Encoding utf8
+          Restart-Service W3SVC -Force
+
+          # First request: should return 500 (fail closed)
+          Start-Sleep -Seconds 3
+          try {
+            $response = Invoke-WebRequest "http://localhost/" -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
+            if ($response.StatusCode -eq 500) {
+              Write-Host "PASS: fail-closed on bad config returned 500"
+            } else {
+              Write-Host "FAIL: fail-closed expected 500, got $($response.StatusCode)"
+              exit 1
+            }
+          } catch {
+            Write-Host "ERROR: fail-closed test request failed: $($_.Exception.Message)"
+            exit 1
+          }
+
+          # Verify event log contains the failure marker
+          $events = Get-EventLog -LogName Application -Source ModSecurity -Newest 20 |
+            Where-Object { $_.EntryType -eq 'Error' }
+          if ($events -and $events.Count -gt 0) {
+            Write-Host "PASS: event log contains ModSecurity error entries"
+          } else {
+            Write-Host "FAIL: no ModSecurity error entries in event log"
+            exit 1
+          }
+        }
+        finally {
+          # Always restore the original config
+          if (Test-Path $backupConf) {
+            Copy-Item $backupConf $modsecConf -Force
+            Restart-Service W3SVC -Force
+            Start-Sleep -Seconds 3
+            Write-Host "Restored original modsecurity_iis.conf"
+          }
+        }
+
+        # Post-restore sanity check
+        try {
+          $response = Invoke-WebRequest "http://localhost/" -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 30
+          if ($response.StatusCode -eq 200) {
+            Write-Host "PASS: service recovered after config restore"
+          } else {
+            Write-Host "FAIL: expected 200 after restore, got $($response.StatusCode)"
+            exit 1
+          }
+        } catch {
+          Write-Host "ERROR: post-restore request failed: $($_.Exception.Message)"
+          exit 1
+        }
+
     - name: Install go-ftw
       shell: pwsh
       run: |

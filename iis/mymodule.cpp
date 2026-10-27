@@ -744,9 +744,12 @@ CMyHttpModule::OnBeginRequest(
 
     hr = MODSECURITY_STORED_CONTEXT::GetConfig(pHttpContext, &pConfig );
     
-    if ( FAILED( hr ) )
+    if ( FAILED( hr ) || pConfig == NULL )
     {
         LeaveCriticalSection(&m_csLock);
+        WriteEventViewerLog(
+            "ModSecurity: failed to retrieve module configuration context.",
+            EVENTLOG_ERROR_TYPE);
         pHttpContext->GetResponse()->SetStatus(500, "WAF internal error. Unable to get config.");
         pHttpContext->SetRequestHandled();
         return RQ_NOTIFICATION_FINISH_REQUEST;
@@ -759,6 +762,10 @@ CMyHttpModule::OnBeginRequest(
         goto Finished;
 	}
 
+    // Report a config load failure via sticky flag: once set, every
+    // subsequent request returns 500 until the process is recycled.
+    // We intentionally do NOT auto-recover — the fix is to repair the
+    // modsecurity.conf, which the stored-context layer does not detect.
     auto reportConfigurationError = [pConfig, pHttpContext, this] {
         pConfig->configLoadingFailed = true;
         pConfig->m_Config = NULL;
@@ -782,6 +789,22 @@ CMyHttpModule::OnBeginRequest(
 
 		if ( FAILED( hr ) )
 		{
+			WriteEventViewerLog(
+				"ModSecurity: failed to convert configured rule file path.",
+				EVENTLOG_ERROR_TYPE);
+            return reportConfigurationError();
+		}
+
+		if (path[0] == 0)
+		{
+			// No SecRuleEngine On and no rules file — SecRuleEngine was
+			// not configured, but the module was enabled. This is a
+			// misconfiguration and we fail closed rather than silently
+			// running with an empty ruleset (which would be fail-open).
+			WriteEventViewerLog(
+				"ModSecurity: rule file path is empty but the module is enabled.",
+				EVENTLOG_ERROR_TYPE);
+			delete[] path;
             return reportConfigurationError();
 		}
 
@@ -795,32 +818,32 @@ CMyHttpModule::OnBeginRequest(
 
 		if ( FAILED( hr ) )
 		{
-			delete path;
+			WriteEventViewerLog(
+				"ModSecurity: failed to convert IIS application physical path.",
+				EVENTLOG_ERROR_TYPE);
+			delete[] path;
             return reportConfigurationError();
 		}
 
-		if(path[0] != 0)
+		const char * err = modsecProcessConfig((directory_config *)pConfig->m_Config, path, apppath);
+
+		if(err != NULL)
 		{
-			const char * err = modsecProcessConfig((directory_config *)pConfig->m_Config, path, apppath);
-
-			if(err != NULL)
-			{
-				WriteEventViewerLog(err, EVENTLOG_ERROR_TYPE);
-				delete apppath;
-				delete path;
-                return reportConfigurationError();
-			}
-
-			modsecReportRemoteLoadedRules();
-			if (this->status_call_already_sent == false)
-			{
-				this->status_call_already_sent = true;
-				modsecStatusEngineCall();
-			}
+			WriteEventViewerLog(err, EVENTLOG_ERROR_TYPE);
+			delete[] apppath;
+			delete[] path;
+            return reportConfigurationError();
 		}
 
-		delete apppath;
-		delete path;
+		modsecReportRemoteLoadedRules();
+		if (this->status_call_already_sent == false)
+		{
+			this->status_call_already_sent = true;
+			modsecStatusEngineCall();
+		}
+
+		delete[] apppath;
+		delete[] path;
 	}
 
 	conn_rec *c;
