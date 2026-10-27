@@ -466,7 +466,8 @@ MODSECURITY_STORED_CONTEXT::~MODSECURITY_STORED_CONTEXT()
 MODSECURITY_STORED_CONTEXT::MODSECURITY_STORED_CONTEXT():
     m_bIsEnabled ( FALSE ),
     m_pszPath( NULL ),
-	m_Config( NULL )
+	m_Config( NULL ),
+	configLoadingFailed( false )
 {
 }
 

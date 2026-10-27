@@ -68,6 +68,7 @@ class MODSECURITY_STORED_CONTEXT : public IHttpStoredContext
             USHORT*  pdwLengthDestination );
 
 	void*			  m_Config;
+	bool			  configLoadingFailed;
 
 private:
     HRESULT 

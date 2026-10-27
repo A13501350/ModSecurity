@@ -723,7 +723,8 @@ CMyHttpModule::OnBeginRequest(
     HRESULT                         hr                  = S_OK;
     IHttpRequest*                   pRequest            = NULL;
 	MODSECURITY_STORED_CONTEXT*		pConfig = NULL;
-    
+	bool							configError         = false;
+
     UNREFERENCED_PARAMETER ( pProvider );
 
 	EnterCriticalSection(&m_csLock);
@@ -744,12 +745,24 @@ CMyHttpModule::OnBeginRequest(
 
     hr = MODSECURITY_STORED_CONTEXT::GetConfig(pHttpContext, &pConfig );
     
-    if ( FAILED( hr ) )
+    if ( FAILED( hr ) || pConfig == NULL )
     {
-        //hr = E_UNEXPECTED;
-		hr = S_OK;
+        WriteEventViewerLog(
+            "ModSecurity: failed to retrieve module configuration context for this request.",
+            EVENTLOG_ERROR_TYPE );
+        configError = true;
         goto Finished;
     }
+
+	// If a previous config load for this application pool failed,
+	// fail closed for every subsequent request until the pool is recycled.
+	// Recovery after fixing the config file requires an app-pool recycle
+	// because IIS does not notify native modules when modsecurity.conf changes.
+	if ( pConfig->configLoadingFailed )
+	{
+		configError = true;
+		goto Finished;
+	}
 
 	// If module is disabled, dont go any further
 	//
@@ -760,29 +773,38 @@ CMyHttpModule::OnBeginRequest(
 
 	if(pConfig->m_Config == NULL)
 	{
-		char *path;
-		USHORT pathlen;
+		char *path = NULL;
+		USHORT pathlen = 0;
 
+		// GlobalWideCharToMultiByte returns a Win32 DWORD error code
+		// (positive integer). Comparing with hr != 0 is safe whether the
+		// function signature stays DWORD or is later changed to HRESULT.
 		hr = pConfig->GlobalWideCharToMultiByte(pConfig->GetPath(), wcslen(pConfig->GetPath()), &path, &pathlen);
 
-		if ( FAILED( hr ) )
+		if ( hr != 0 )
 		{
-			hr = E_UNEXPECTED;
+			WriteEventViewerLog(
+				"ModSecurity: failed to convert configured rule file path to multibyte.",
+				EVENTLOG_ERROR_TYPE );
+			configError = true;
 			goto Finished;
 		}
 
 		pConfig->m_Config = modsecGetDefaultConfig();
 
 		PCWSTR servpath = pHttpContext->GetApplication()->GetApplicationPhysicalPath();
-		char *apppath;
-		USHORT apppathlen;
+		char *apppath = NULL;
+		USHORT apppathlen = 0;
 
 		hr = pConfig->GlobalWideCharToMultiByte((WCHAR *)servpath, wcslen(servpath), &apppath, &apppathlen);
 
-		if ( FAILED( hr ) )
+		if ( hr != 0 )
 		{
-			delete path;
-			hr = E_UNEXPECTED;
+			delete[] path;
+			WriteEventViewerLog(
+				"ModSecurity: failed to convert IIS application path to multibyte.",
+				EVENTLOG_ERROR_TYPE );
+			configError = true;
 			goto Finished;
 		}
 
@@ -793,8 +815,9 @@ CMyHttpModule::OnBeginRequest(
 			if(err != NULL)
 			{
 				WriteEventViewerLog(err, EVENTLOG_ERROR_TYPE);
-				delete apppath;
-				delete path;
+				delete[] apppath;
+				delete[] path;
+				configError = true;
 				goto Finished;
 			}
 
@@ -805,9 +828,22 @@ CMyHttpModule::OnBeginRequest(
 				modsecStatusEngineCall();
 			}
 		}
+		else
+		{
+			// Empty rule file path on an enabled module is a misconfiguration,
+			// not an intentional "no rules". Fail closed rather than run with
+			// an empty default config.
+			delete[] apppath;
+			delete[] path;
+			WriteEventViewerLog(
+				"ModSecurity: enabled but no SecRuleEngine config file path is set. Treating as misconfiguration.",
+				EVENTLOG_ERROR_TYPE );
+			configError = true;
+			goto Finished;
+		}
 
-		delete apppath;
-		delete path;
+		delete[] apppath;
+		delete[] path;
 	}
 
 	conn_rec *c;
@@ -1076,6 +1112,25 @@ CMyHttpModule::OnBeginRequest(
 
 Finished:
 	LeaveCriticalSection(&m_csLock);
+
+	// First config-load failure for this app-pool lifetime: mark the context
+	// sticky-failed so subsequent requests also fail closed until recycle.
+	// pConfig may be NULL here if GetConfig itself failed earlier.
+	if ( configError && pConfig != NULL )
+	{
+		pConfig->configLoadingFailed = true;
+		pConfig->m_Config = NULL;
+	}
+
+	// Fail closed: config loading never completed successfully, so
+	// forwarding the request would mean running with zero rules (fail open).
+	// Use SetStatus without SetRequestHandled so IIS renders its own 500
+	// httpErrors page instead of a bare status line.
+	if ( configError )
+	{
+		pHttpContext->GetResponse()->SetStatus(500, "ModSecurity Internal Error");
+		return RQ_NOTIFICATION_FINISH_REQUEST;
+	}
 
     if ( FAILED( hr )  )
     {
