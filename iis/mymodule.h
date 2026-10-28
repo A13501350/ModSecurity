@@ -53,6 +53,7 @@ public:
 
     BOOL WriteEventViewerLog(LPCSTR szNotification, WORD category = EVENTLOG_INFORMATION_TYPE);
     BOOL status_call_already_sent;
+    BOOL config_error_log_sent;
 };
 
 #endif

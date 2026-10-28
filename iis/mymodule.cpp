@@ -747,12 +747,30 @@ CMyHttpModule::OnBeginRequest(
     
     if ( FAILED( hr ) || pConfig == NULL )
     {
-        WriteEventViewerLog(
-            "ModSecurity: failed to retrieve module configuration context for this request.",
-            EVENTLOG_ERROR_TYPE );
+        // Log once per process: while the config section stays unreadable
+        // this branch runs on every request, and ReportEvent is an RPC we
+        // must not repeat under the global lock.
+        if ( this->config_error_log_sent == FALSE )
+        {
+            this->config_error_log_sent = TRUE;
+            WriteEventViewerLog(
+                "ModSecurity: failed to retrieve module configuration context. "
+                "Failing closed (500); recycle the application pool after fixing the cause.",
+                EVENTLOG_ERROR_TYPE );
+        }
         configError = true;
         goto Finished;
     }
+
+	// If module is disabled, dont go any further. This check precedes the
+	// sticky-failure latch below so an admin can always shut the module off
+	// even while latched: toggling `enabled` changes IIS configuration,
+	// which makes IIS discard the stored context (and the latch with it).
+	//
+	if( pConfig->GetIsEnabled() == false )
+	{
+        goto Finished;
+	}
 
 	// If a previous config load for this application pool failed,
 	// fail closed for every subsequent request until the pool is recycled.
@@ -762,13 +780,6 @@ CMyHttpModule::OnBeginRequest(
 	{
 		configError = true;
 		goto Finished;
-	}
-
-	// If module is disabled, dont go any further
-	//
-	if( pConfig->GetIsEnabled() == false )
-	{
-        goto Finished;
 	}
 
 	if(pConfig->m_Config == NULL)
@@ -784,13 +795,25 @@ CMyHttpModule::OnBeginRequest(
 		if ( hr != 0 )
 		{
 			WriteEventViewerLog(
-				"ModSecurity: failed to convert configured rule file path to multibyte.",
+				"ModSecurity: failed to convert configured rule file path to multibyte. "
+				"Failing closed (500); recycle the application pool after fixing the cause.",
 				EVENTLOG_ERROR_TYPE );
 			configError = true;
 			goto Finished;
 		}
 
 		pConfig->m_Config = modsecGetDefaultConfig();
+
+		if ( pConfig->m_Config == NULL )
+		{
+			delete[] path;
+			WriteEventViewerLog(
+				"ModSecurity: failed to allocate default configuration (out of memory). "
+				"Failing closed (500); recycle the application pool after fixing the cause.",
+				EVENTLOG_ERROR_TYPE );
+			configError = true;
+			goto Finished;
+		}
 
 		PCWSTR servpath = pHttpContext->GetApplication()->GetApplicationPhysicalPath();
 		char *apppath = NULL;
@@ -802,7 +825,8 @@ CMyHttpModule::OnBeginRequest(
 		{
 			delete[] path;
 			WriteEventViewerLog(
-				"ModSecurity: failed to convert IIS application path to multibyte.",
+				"ModSecurity: failed to convert IIS application path to multibyte. "
+				"Failing closed (500); recycle the application pool after fixing the cause.",
 				EVENTLOG_ERROR_TYPE );
 			configError = true;
 			goto Finished;
@@ -815,6 +839,10 @@ CMyHttpModule::OnBeginRequest(
 			if(err != NULL)
 			{
 				WriteEventViewerLog(err, EVENTLOG_ERROR_TYPE);
+				WriteEventViewerLog(
+					"ModSecurity: configuration load failed. Failing closed (500); "
+					"fix the configuration file and recycle the application pool.",
+					EVENTLOG_ERROR_TYPE );
 				delete[] apppath;
 				delete[] path;
 				configError = true;
@@ -830,13 +858,14 @@ CMyHttpModule::OnBeginRequest(
 		}
 		else
 		{
-			// Empty rule file path on an enabled module is a misconfiguration,
-			// not an intentional "no rules". Fail closed rather than run with
-			// an empty default config.
+			// Defensive: the IIS schema marks configFile as nonEmptyString with
+			// a default value, so an empty path should not occur. Treat it as
+			// misconfiguration rather than running with an empty rule set.
 			delete[] apppath;
 			delete[] path;
 			WriteEventViewerLog(
-				"ModSecurity: enabled but no SecRuleEngine config file path is set. Treating as misconfiguration.",
+				"ModSecurity: enabled but no config file path is set. "
+				"Failing closed (500); recycle the application pool after fixing the cause.",
 				EVENTLOG_ERROR_TYPE );
 			configError = true;
 			goto Finished;
@@ -1128,7 +1157,11 @@ Finished:
 	// httpErrors page instead of a bare status line.
 	if ( configError )
 	{
-		pHttpContext->GetResponse()->SetStatus(500, "ModSecurity Internal Error");
+		IHttpResponse * pResponse = pHttpContext->GetResponse();
+		if ( pResponse != NULL )
+		{
+			pResponse->SetStatus(500, "ModSecurity Internal Error");
+		}
 		return RQ_NOTIFICATION_FINISH_REQUEST;
 	}
 
@@ -1318,6 +1351,7 @@ CMyHttpModule::CMyHttpModule()
     m_dwPageSize = sysInfo.dwPageSize;
 
     this->status_call_already_sent = false;
+    this->config_error_log_sent = false;
 
 	InitializeCriticalSection(&m_csLock);
 
