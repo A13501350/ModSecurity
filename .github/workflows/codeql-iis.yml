@@ -1,0 +1,117 @@
+name: CodeQL for IIS Module
+
+# Manually triggered only. Target branch: v2/master.
+# The build steps below (Apache path, MSYS2/ssdeep, vcpkg cache, CMake
+# configure) MUST stay in sync with the x64 leg of test-ci-windows.yml.
+# If those flags drift, CodeQL analyzes a different artifact than we ship.
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-iis-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Set Apache path
+      shell: pwsh
+      run: |
+        echo "APACHE_ROOT=C:\tools\Apache24" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@fb197b72ce45fb24f17bf3f807a388985654d1f2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >
+          git
+          make
+          autoconf
+          automake
+          libtool
+          mingw-w64-ucrt-x86_64-gcc
+          mingw-w64-ucrt-x86_64-pkg-config
+
+    - name: Clone and build ssdeep
+      shell: msys2 {0}
+      run: |
+        MSYS2_WORKSPACE=$(cygpath -u '${{ github.workspace }}')
+
+        git clone https://github.com/ssdeep-project/ssdeep.git --depth 1
+        cd ssdeep
+        autoreconf -i
+
+        ./configure --enable-shared --disable-static CFLAGS="-O3" CXXFLAGS="-O3"
+
+        make dll
+
+        mkdir -p "${MSYS2_WORKSPACE}/ssdeep-install/"
+        cp -v fuzzy.dll "${MSYS2_WORKSPACE}/ssdeep-install/"
+        cp -v fuzzy.h "${MSYS2_WORKSPACE}/ssdeep-install/"
+        cp -v fuzzy.def "${MSYS2_WORKSPACE}/ssdeep-install/"
+
+    - name: Restore vcpkg cache
+      id: vcpkg-cache
+      uses: TAServers/vcpkg-cache@e848939f754daf406a06006be2e05eb5b17cc481
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        prefix: vcpkg-iis-module-x64/
+
+    - uses: ammaraskar/msvc-problem-matcher@1ebcb382869bfdc2cc645e8a2a43b6d319ea1cc0
+
+    - name: Configure CMake for IIS Module
+      env:
+        VCPKG_FEATURE_FLAGS: "binarycaching"
+        VCPKG_BINARY_SOURCES: "clear;files,${{ steps.vcpkg-cache.outputs.path }},readwrite"
+        VCPKG_DEFAULT_TRIPLET: x64-windows
+      run: |
+        cmake `
+        -DAPACHE_ROOT="$env:APACHE_ROOT" `
+        -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\iis\release\amd64" `
+        -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
+        -DSSDEEP_ROOT="${{ github.workspace }}\ssdeep-install" `
+        -DWITH_SSDEEP=ON `
+        -A x64 `
+        -DWITH_LUA=ON `
+        -DWITH_YAJL=ON `
+        -S IIS -B "iis\build"
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: c-cpp
+        build-mode: manual
+
+    - name: Build IIS Module
+      shell: pwsh
+      run: |
+        cmake --build "iis\build" --config Release
+
+    - name: Analyze
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: /language:c-cpp
+        output: ${{ github.workspace }}/codeql-results
+
+    - name: Upload SARIF as artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: codeql-sarif
+        path: ${{ github.workspace }}/codeql-results
+        if-no-files-found: warn
