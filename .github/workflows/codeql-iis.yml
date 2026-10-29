@@ -6,6 +6,10 @@ name: CodeQL for IIS Module
 # If those flags drift, CodeQL analyzes a different artifact than we ship.
 on:
   workflow_dispatch:
+  # TEMPORARY: workflow_dispatch requires the file to exist on the default
+  # branch (v3/master). Remove this block once the run is verified.
+  push:
+    branches: [ci/codeql-iis]
 
 permissions:
   actions: read
